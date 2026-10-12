@@ -26,6 +26,7 @@
 <script>
 const CONFIG = {
   SHEET_ID: '1W9Wr6kba9m26oo890PAdTIE31UrAaRRnSyz561CeOHk',
+  CACHE_TTL_MIN: 15,
   SHEETS: {
     SO90:  'SO_90 Day',
     ITEMS: 'ItemCode'
@@ -42,11 +43,10 @@ const CONFIG = {
     ITEM_UOM:      'SalUnitMsr',
     ITEM_GROUP:    'ItmsGrpCod'
   },
-  // ==== CẤU HÌNH SẢN XUẤT ====
   PROD_LINES:  ['Line 6', 'Line 7', 'Line 8', 'Line CL', 'Orther'],
   PROD_SHIFTS: ['Ca A6', 'Ca B6', 'Ca A7', 'Ca B7', 'Ca A8', 'Ca B8', 'Orther'],
   PACK_MACHINES: ['Máy 1', 'Máy 2', 'Máy 3', 'Máy 4', 'Máy 5'],
-  OTHER_VALUE: 'Orther',       // giá trị trigger nhập tay
+  OTHER_VALUE: 'Orther',
   DEFAULT_LINE:  '',
   DEFAULT_SHIFT: '',
   DEFAULT_MACHINE: '',
@@ -66,6 +66,7 @@ const state = {
   itemByCode: new Map(),
   currentDistributor: null,
   currentUser: null,
+  sessionId: null,
   cart: [],
   defaults: {
     line: CONFIG.DEFAULT_LINE,
@@ -91,15 +92,60 @@ const normalize = (s) => (s||'').toString().trim().toLowerCase()
 const normKey = (s) => (s||'').toString().trim().toUpperCase();
 const cartKey = (x) => [x.itemCode, x.prodDate||'', x.prodLine||'', x.prodShift||'', x.packMachine||''].join('|');
 
-// ============ LOAD DATA ============
+const genSessionId = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2,'0');
+  const stamp = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const rnd = Math.random().toString(36).slice(2,6).toUpperCase();
+  return `${stamp}-${rnd}`;
+};
+
+// ============ LOAD DATA (CACHE) ============
 async function loadSheet(name) {
-  return new Promise((resolve, reject) => {
+  const cacheKey = `kks_cache_${name}`;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) {
+    try {
+      const { data, ts } = JSON.parse(cached);
+      const ageMin = (Date.now() - ts) / 60000;
+      if (ageMin < CONFIG.CACHE_TTL_MIN) {
+        console.log(`[cache] Dùng cache cho ${name} (${ageMin.toFixed(1)} phút)`);
+        return data;
+      }
+    } catch(_) {}
+  }
+  const data = await new Promise((resolve, reject) => {
     Papa.parse(gvizURL(name), {
       download: true, header: true, skipEmptyLines: true,
       complete: (res) => resolve(res.data),
       error: reject
     });
   });
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify({ data, ts: Date.now() }));
+  } catch(e) {
+    console.warn('Không lưu được cache:', e);
+  }
+  return data;
+}
+
+function clearSheetCache() {
+  localStorage.removeItem(`kks_cache_${CONFIG.SHEETS.SO90}`);
+  localStorage.removeItem(`kks_cache_${CONFIG.SHEETS.ITEMS}`);
+  toast('Đã xóa cache. Đang tải lại...', 'info');
+  setTimeout(() => location.reload(), 800);
+}
+
+function showCacheAge() {
+  const cached = localStorage.getItem(`kks_cache_${CONFIG.SHEETS.ITEMS}`);
+  if (cached) {
+    try {
+      const { ts } = JSON.parse(cached);
+      const ageMin = Math.floor((Date.now() - ts) / 60000);
+      const el = document.getElementById('cacheInfo');
+      if (el) el.textContent = ageMin < 1 ? '(vừa tải)' : `(cache ${ageMin}p)`;
+    } catch(_) {}
+  }
 }
 
 async function boot() {
@@ -166,6 +212,7 @@ async function boot() {
         if (s.currentDistributor && s.currentUser) {
           state.currentDistributor = s.currentDistributor;
           state.currentUser = s.currentUser;
+          state.sessionId = s.sessionId || genSessionId();
           state.cart = s.cart || [];
           showScreen('main');
           renderDistHeader();
@@ -177,6 +224,7 @@ async function boot() {
     } else {
       showScreen('login');
     }
+    showCacheAge();
     toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU`, 'success');
   } catch (e) {
     console.error(e);
@@ -220,6 +268,7 @@ function doLogin() {
 
   state.currentDistributor = found;
   state.currentUser = { name: userName, phone: userPhone };
+  state.sessionId = genSessionId();
   state.cart = [];
   saveSession();
   showScreen('main');
@@ -231,6 +280,7 @@ function logout() {
   if (!confirm('Kết thúc phiên kiểm kê hiện tại?')) return;
   state.currentDistributor = null;
   state.currentUser = null;
+  state.sessionId = null;
   state.cart = [];
   localStorage.removeItem('kks_session');
   showScreen('login');
@@ -243,6 +293,7 @@ function saveSession() {
   localStorage.setItem('kks_session', JSON.stringify({
     currentDistributor: state.currentDistributor,
     currentUser: state.currentUser,
+    sessionId: state.sessionId,
     cart: state.cart
   }));
 }
@@ -259,6 +310,7 @@ function renderDistHeader() {
   $('#distName').textContent = d.name || '(không tên)';
   $('#distAlias').textContent = aliases ? `(${aliases})` : '';
   $('#userInfo').textContent = u.name ? `👤 ${u.name} • 📞 ${u.phone}` : '';
+  $('#sessionInfo').textContent = state.sessionId ? `🔑 ${state.sessionId}` : '';
 }
 
 // ============ SCANNER ============
@@ -298,7 +350,17 @@ function onBarcodeDetected(code) {
 
   if (navigator.vibrate) navigator.vibrate(80);
   const item = state.itemByBarcode.get(normKey(code));
-  if (!item) { toast('Barcode chưa có trong ItemCode: ' + code, 'error'); return; }
+
+  if (!item) {
+    // Không tìm thấy → chuyển sang nhập mã SP, prefill giá trị đã quét
+    closeScanner().then(() => {
+      openItemCodeModal();
+      $('#itemCodeInput').value = code;
+      onItemCodeInput();
+      toast('Không có SKU cho barcode: ' + code, 'error');
+    });
+    return;
+  }
   closeScanner().then(() => openQtyModal(item));
 }
 
@@ -354,6 +416,71 @@ function pickSearchResult(code) {
   openQtyModal(item);
 }
 
+// ============ ITEM CODE MANUAL INPUT ============
+function openItemCodeModal() {
+  $('#itemCodeModal').classList.remove('hidden');
+  $('#itemCodeInput').value = '';
+  $('#itemCodePreview').classList.add('hidden');
+  $('#itemCodePreview').innerHTML = '';
+  setTimeout(() => $('#itemCodeInput').focus(), 120);
+}
+
+function closeItemCodeModal() {
+  $('#itemCodeModal').classList.add('hidden');
+  $('#itemCodeInput').value = '';
+  $('#itemCodePreview').classList.add('hidden');
+}
+
+function onItemCodeInput() {
+  const code = $('#itemCodeInput').value.trim();
+  const preview = $('#itemCodePreview');
+  if (!code) {
+    preview.classList.add('hidden');
+    preview.innerHTML = '';
+    return;
+  }
+  const item = state.itemByCode.get(normKey(code));
+  if (item) {
+    preview.innerHTML = `
+      <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+        <div class="font-semibold text-green-800 text-sm">✅ ${item.name || '(không tên)'}</div>
+        ${item.frgn && item.frgn !== item.name ? `<div class="text-xs text-green-700 italic mt-0.5">${item.frgn}</div>` : ''}
+        <div class="text-xs text-green-700 mt-1">
+          <span class="font-mono">${item.code}</span>
+          ${item.barcode ? ' • BC: ' + item.barcode : ' • <span class="text-amber-600">Không BC</span>'}
+          • 1 thùng = ${fmt(item.numInSale)} ${item.uom || 'sp'}
+        </div>
+      </div>`;
+  } else {
+    preview.innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3">
+        <div class="text-sm text-red-700">❌ Không tìm thấy mã: <span class="font-mono font-bold">${code}</span></div>
+        <div class="text-xs text-red-600 mt-1">Kiểm tra lại hoặc dùng "Tìm theo tên"</div>
+      </div>`;
+  }
+  preview.classList.remove('hidden');
+}
+
+function submitItemCode() {
+  const code = $('#itemCodeInput').value.trim();
+  if (!code) return toast('Nhập mã sản phẩm', 'error');
+  const item = state.itemByCode.get(normKey(code));
+  if (!item) return toast('Không tìm thấy mã: ' + code, 'error');
+  closeItemCodeModal();
+  openQtyModal(item);
+}
+
+function scanToManual() {
+  const lastCode = lastScan.code;
+  closeScanner().then(() => {
+    openItemCodeModal();
+    if (lastCode) {
+      $('#itemCodeInput').value = lastCode;
+      onItemCodeInput();
+    }
+  });
+}
+
 // ============ QTY MODAL ============
 let currentItem = null;
 
@@ -369,10 +496,8 @@ function openQtyModal(item) {
   $('#qtyCases').value = '';
   $('#qtyPacks').value = '';
   $('#qtyTotal').value = '';
-
   $('#qtyProdDate').value = todayISO();
 
-  // Reset Line / Ca và ẩn input "Other"
   fillSelect('#qtyProdLine',   CONFIG.PROD_LINES,     state.defaults.line);
   fillSelect('#qtyProdShift',  CONFIG.PROD_SHIFTS,    state.defaults.shift);
   $('#qtyProdLineOther').value  = '';
@@ -380,7 +505,6 @@ function openQtyModal(item) {
   $('#qtyProdLineOther').classList.add('hidden-input');
   $('#qtyProdShiftOther').classList.add('hidden-input');
 
-  // Nếu default là "Orther" đã lưu trước đó → hiện lại input
   if (state.defaults.line === CONFIG.OTHER_VALUE && state.defaults.lineCustom) {
     $('#qtyProdLineOther').value = state.defaults.lineCustom;
     $('#qtyProdLineOther').classList.remove('hidden-input');
@@ -391,7 +515,6 @@ function openQtyModal(item) {
   }
 
   fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, state.defaults.machine);
-
   updateQtyTotal();
   $('#qtyModal').classList.remove('hidden');
   setTimeout(()=>$('#qtyCases').focus(), 200);
@@ -410,7 +533,6 @@ function fillTextDatalist(sel, options, value) {
   if (dl) dl.innerHTML = options.map(o => `<option value="${o}"></option>`).join('');
 }
 
-// Xử lý khi đổi dropdown Line
 function onLineChange() {
   const val = $('#qtyProdLine').value;
   const otherInput = $('#qtyProdLineOther');
@@ -423,7 +545,6 @@ function onLineChange() {
   }
 }
 
-// Xử lý khi đổi dropdown Ca
 function onShiftChange() {
   const val = $('#qtyProdShift').value;
   const otherInput = $('#qtyProdShiftOther');
@@ -463,7 +584,6 @@ function addToCart() {
 
   const prodDate = $('#qtyProdDate').value;
 
-  // Xử lý Line
   let prodLine = $('#qtyProdLine').value;
   if (prodLine === CONFIG.OTHER_VALUE) {
     const custom = $('#qtyProdLineOther').value.trim();
@@ -471,7 +591,6 @@ function addToCart() {
     prodLine = custom;
   }
 
-  // Xử lý Ca
   let prodShift = $('#qtyProdShift').value;
   if (prodShift === CONFIG.OTHER_VALUE) {
     const custom = $('#qtyProdShiftOther').value.trim();
@@ -486,7 +605,6 @@ function addToCart() {
   if (!prodShift)    return toast('Chọn Ca sản xuất', 'error');
   if (!packMachine)  return toast('Nhập số máy đóng gói', 'error');
 
-  // Lưu default — nhớ cả giá trị custom nếu là Orther
   state.defaults = {
     line:   $('#qtyProdLine').value === CONFIG.OTHER_VALUE ? CONFIG.OTHER_VALUE : prodLine,
     lineCustom: $('#qtyProdLine').value === CONFIG.OTHER_VALUE ? prodLine : '',
@@ -577,13 +695,13 @@ function exportCSV() {
   const d = state.currentDistributor;
   const u = state.currentUser || {};
   const rows = [
-    ['DistributorCode','DistributorName',
+    ['SessionID','DistributorCode','DistributorName',
      'UserName','UserPhone',
      'ItemCode','ItemName','CodeBars','NumInSale','SalUnitMsr',
      'ProdDate','ProdLine','ProdShift','PackMachine',
      'Cases','Packs','Total','Timestamp'],
     ...state.cart.map(x => [
-      d.code, d.name,
+      state.sessionId, d.code, d.name,
       u.name, u.phone,
       x.itemCode, x.itemName, x.barcode, x.numInSale, x.uom,
       x.prodDate, x.prodLine, x.prodShift, x.packMachine,
@@ -595,7 +713,7 @@ function exportCSV() {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   const safeUser = (u.name||'User').replace(/\s+/g,'');
-  a.download = `KiemKe_${d.code}_${safeUser}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `KiemKe_${d.code}_${safeUser}_${state.sessionId}.csv`;
   a.click();
   toast('Đã xuất CSV', 'success');
 }
@@ -606,11 +724,12 @@ async function submitToSheet() {
   if (!state.currentUser) return toast('Thiếu thông tin người thực hiện', 'error');
 
   const u = state.currentUser;
-  if (!confirm(`Gửi ${state.cart.length} dòng?\nNgười thực hiện: ${u.name} — ${u.phone}`)) return;
+  if (!confirm(`Gửi ${state.cart.length} dòng?\nNgười thực hiện: ${u.name} — ${u.phone}\nSession: ${state.sessionId}`)) return;
 
   const payload = {
     distributor: state.currentDistributor,
     user: state.currentUser,
+    sessionId: state.sessionId,
     items: state.cart,
     timestamp: new Date().toISOString()
   };
@@ -631,6 +750,10 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#loginUser').addEventListener('keydown', e => e.key==='Enter' && doLogin());
   $('#loginPhone').addEventListener('keydown', e => e.key==='Enter' && doLogin());
   $('#logoutBtn').onclick = logout;
+  $('#reloadBtn').onclick = () => {
+    if (!confirm('Tải lại dữ liệu từ Google Sheet? (Xóa cache)')) return;
+    clearSheetCache();
+  };
 
   $('#scanBtn').onclick = openScanner;
   $('#closeScanBtn').onclick = closeScanner;
@@ -639,12 +762,22 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#closeSearchBtn').onclick = closeSearch;
   $('#searchInput').addEventListener('input', e => renderSearchResults(e.target.value));
 
+  // === Nhập mã SP thủ công ===
+  $('#itemCodeBtn').onclick = openItemCodeModal;
+  $('#closeItemCodeBtn').onclick = closeItemCodeModal;
+  $('#itemCodeCancelBtn').onclick = closeItemCodeModal;
+  $('#itemCodeNextBtn').onclick = submitItemCode;
+  $('#itemCodeInput').addEventListener('input', onItemCodeInput);
+  $('#itemCodeInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); submitItemCode(); }
+  });
+  $('#scanToManualBtn').onclick = scanToManual;
+
   $('#qtyCases').addEventListener('input', updateQtyTotal);
   $('#qtyPacks').addEventListener('input', updateQtyTotal);
   $('#qtyCancelBtn').onclick = closeQtyModal;
   $('#qtyAddBtn').onclick = addToCart;
 
-  // Event cho dropdown Orther
   $('#qtyProdLine').addEventListener('change', onLineChange);
   $('#qtyProdShift').addEventListener('change', onShiftChange);
 
@@ -701,13 +834,20 @@ window.addEventListener('DOMContentLoaded', () => {
 <!-- ============ SCREEN: MAIN ============ -->
 <div id="screen-main" class="hidden min-h-screen pb-32">
   <header class="bg-blue-700 text-white sticky top-0 z-30 shadow-md">
-    <div class="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
+    <div class="max-w-2xl mx-auto px-4 py-3 flex items-start justify-between gap-2">
       <div class="min-w-0 flex-1">
         <div class="text-xs opacity-80">Nhà phân phối</div>
         <div id="distCode" class="font-mono text-sm opacity-90"></div>
         <div id="distName" class="font-bold truncate"></div>
         <div id="distAlias" class="text-xs opacity-75 truncate"></div>
         <div id="userInfo" class="text-xs opacity-90 truncate mt-0.5"></div>
+        <div id="sessionInfo" class="text-[10px] opacity-70 font-mono truncate"></div>
+        <div class="flex items-center gap-2 mt-1">
+          <button id="reloadBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1 rounded whitespace-nowrap">
+            🔄 Tải lại
+          </button>
+          <span id="cacheInfo" class="text-[10px] opacity-70"></span>
+        </div>
       </div>
       <button id="logoutBtn" class="text-xs bg-blue-800 hover:bg-blue-900 px-3 py-2 rounded-lg whitespace-nowrap">
         Đăng xuất
@@ -726,6 +866,11 @@ window.addEventListener('DOMContentLoaded', () => {
         class="bg-slate-700 hover:bg-slate-800 text-white font-semibold py-4 rounded-xl shadow flex flex-col items-center gap-1">
         <span class="text-2xl">🔍</span>
         <span class="text-sm">Tìm theo tên</span>
+      </button>
+      <button id="itemCodeBtn"
+        class="col-span-2 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 rounded-xl shadow flex items-center justify-center gap-2">
+        <span class="text-xl">⌨️</span>
+        <span class="text-sm">Nhập mã SP (không quét được barcode)</span>
       </button>
     </div>
 
@@ -770,7 +915,15 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="scan-line"></div>
     </div>
   </div>
-  <p class="text-center text-white/70 text-sm pb-6">Đưa barcode vào khung • Tự động nhận diện</p>
+  <div class="pb-6 px-4">
+    <p class="text-center text-white/70 text-sm mb-3">Đưa barcode vào khung • Tự động nhận diện</p>
+    <div class="flex justify-center">
+      <button id="scanToManualBtn"
+        class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-4 rounded-lg text-sm flex items-center gap-2">
+        ⌨️ Không quét được? Nhập mã SP
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- ============ MODAL: SEARCH ============ -->
@@ -785,13 +938,37 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
+<!-- ============ MODAL: NHẬP MÃ SP ============ -->
+<div id="itemCodeModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5">
+    <div class="flex items-start justify-between gap-2 mb-4">
+      <div>
+        <h3 class="font-bold text-slate-800 text-lg">Nhập mã sản phẩm</h3>
+        <p class="text-xs text-slate-500 mt-0.5">Dành cho SP không quét được barcode hoặc chưa có trong hệ thống</p>
+      </div>
+      <button id="closeItemCodeBtn" class="text-2xl text-slate-500 px-2 leading-none">✕</button>
+    </div>
+
+    <label class="text-xs font-semibold text-slate-600">Mã sản phẩm (ItemCode)</label>
+    <input id="itemCodeInput" type="text" inputmode="text" autocomplete="off" autocapitalize="characters"
+      placeholder="VD: 81002529"
+      class="w-full border border-slate-300 rounded-lg px-3 py-3 text-lg font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+
+    <div id="itemCodePreview" class="mt-3 hidden"></div>
+
+    <div class="grid grid-cols-2 gap-3 mt-5">
+      <button id="itemCodeCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
+      <button id="itemCodeNextBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Tiếp tục</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ MODAL: QUANTITY ============ -->
 <div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center overflow-y-auto">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5 my-4">
     <h3 id="qtyItemName" class="font-bold text-slate-800 text-lg"></h3>
     <p id="qtyItemMeta" class="text-sm text-slate-500 mt-1"></p>
 
-    <!-- Số lượng -->
     <div class="grid grid-cols-2 gap-3 mt-4">
       <div>
         <label class="text-xs font-semibold text-slate-600">Số thùng</label>
@@ -805,7 +982,6 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
     </div>
 
-    <!-- Thông tin sản xuất -->
     <div class="mt-4 pt-4 border-t border-slate-200">
       <div class="text-xs font-bold text-slate-700 mb-2 uppercase tracking-wide">Thông tin sản xuất</div>
 
@@ -823,7 +999,6 @@ window.addEventListener('DOMContentLoaded', () => {
         </div>
       </div>
 
-      <!-- Line -->
       <div class="mt-3">
         <label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
         <select id="qtyProdLine"
@@ -832,7 +1007,6 @@ window.addEventListener('DOMContentLoaded', () => {
           class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
       </div>
 
-      <!-- Ca -->
       <div class="mt-3">
         <label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
         <select id="qtyProdShift"
@@ -842,7 +1016,6 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
     </div>
 
-    <!-- Tổng -->
     <div class="mt-4 bg-slate-50 rounded-lg p-3">
       <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
       <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
