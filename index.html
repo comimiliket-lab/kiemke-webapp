@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Kiểm kê Nhà phân phối</title>
 
-<!-- PWA -->
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="./icon.svg" type="image/svg+xml" />
 <link rel="apple-touch-icon" href="./icon.svg" />
@@ -20,9 +19,10 @@
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <style>
   body { -webkit-tap-highlight-color: transparent; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
-  .scan-line { position:absolute; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; }
+  .scan-line { position:absolute; top:10%; left:0; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; pointer-events:none; z-index:15; }
   @keyframes scan { 0%{top:10%} 50%{top:90%} 100%{top:10%} }
-  #reader video { border-radius: 12px; }
+  #reader { min-height: 280px; }
+  #reader video { border-radius: 12px; width: 100% !important; height: auto !important; }
   .toast { animation: slideIn 0.3s ease-out; }
   @keyframes slideIn { from{transform:translateY(-20px);opacity:0} to{transform:translateY(0);opacity:1} }
   input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
@@ -30,8 +30,6 @@
   select { appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px; }
   .hidden-input { display: none; }
   .skip-mode { opacity: 0.35; pointer-events: none; }
-  .pulse-green { animation: pulseGreen 1.5s infinite; }
-  @keyframes pulseGreen { 0%,100%{box-shadow: 0 0 0 0 rgba(34,197,94,0.7)} 50%{box-shadow: 0 0 0 10px rgba(34,197,94,0)} }
   .offline-badge { animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 </style>
@@ -48,7 +46,6 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// PWA Install prompt
 let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
@@ -94,8 +91,8 @@ const state = {
   items: [], itemByBarcode: new Map(), itemByCode: new Map(),
   currentDistributor: null, currentUser: null, sessionId: null, cart: [],
   defaults: { line: CONFIG.DEFAULT_LINE, shift: CONFIG.DEFAULT_SHIFT, machine: CONFIG.DEFAULT_MACHINE },
-  recentScans: {},           // UX: duplicate detection
-  lastRow: null,             // UX: copy previous
+  recentScans: {},
+  lastRow: null,
   continuousMode: localStorage.getItem('kks_continuous') === 'true',
   torchOn: false
 };
@@ -354,51 +351,74 @@ function renderDistHeader() {
   $('#distAlias').textContent = aliases ? `(${aliases})` : '';
   $('#userInfo').textContent = u.name ? `👤 ${u.name} • 📞 ${u.phone}` : '';
   $('#sessionInfo').textContent = state.sessionId ? `🔑 ${state.sessionId}` : '';
-  // UX: continuous mode toggle
   $('#continuousBtn').classList.toggle('bg-green-500', state.continuousMode);
   $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
 }
 
 // ============ SCANNER ============
 let htmlScanner = null;
+let scannerOpening = false;
 
 async function openScanner() {
+  if (scannerOpening) return;
+  scannerOpening = true;
+
   $('#scanModal').classList.remove('hidden');
+  $('#scanError').classList.add('hidden');
+  $('#flashBtn').classList.add('hidden');
+
+  if (htmlScanner) {
+    try { await htmlScanner.stop(); } catch(_) {}
+    try { await htmlScanner.clear(); } catch(_) {}
+    htmlScanner = null;
+  }
+  $('#reader').innerHTML = '';
+
   try {
-    htmlScanner = new Html5Qrcode('reader');
+    htmlScanner = new Html5Qrcode('reader', { verbose: false });
     await htmlScanner.start(
-      { facingMode: 'environment' },
+      { facingMode: { ideal: 'environment' } },
       { fps: 10, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7 },
-      (decodedText) => onBarcodeDetected(decodedText), () => {}
+      (decodedText) => onBarcodeDetected(decodedText),
+      () => {}
     );
-    // UX: check torch support
+
     setTimeout(() => {
       try {
         const caps = htmlScanner.getRunningTrackCameraCapabilities();
         if (caps && caps.torchFeature().isSupported()) {
           $('#flashBtn').classList.remove('hidden');
-        } else {
-          $('#flashBtn').classList.add('hidden');
         }
-      } catch(_) { $('#flashBtn').classList.add('hidden'); }
-    }, 500);
+      } catch(_) {}
+    }, 400);
+
   } catch (e) {
-    console.error(e); toast('Không mở được camera: ' + e.message, 'error'); closeScanner();
+    console.error('Scanner error:', e);
+    showScanError(e.message || 'Không mở được camera');
+  } finally {
+    scannerOpening = false;
   }
+}
+
+function showScanError(msg) {
+  $('#scanErrorMsg').textContent = msg;
+  $('#scanError').classList.remove('hidden');
+  $('#flashBtn').classList.add('hidden');
 }
 
 async function closeScanner() {
   state.torchOn = false;
   if (htmlScanner) {
-    try { await htmlScanner.stop(); await htmlScanner.clear(); } catch(_) {}
+    try { await htmlScanner.stop(); } catch(_) {}
+    try { await htmlScanner.clear(); } catch(_) {}
     htmlScanner = null;
   }
   $('#flashBtn').classList.add('hidden');
-  $('#flashBtn').classList.remove('bg-yellow-400');
+  $('#flashBtn').classList.remove('bg-yellow-400', 'text-black');
+  $('#scanError').classList.add('hidden');
   $('#scanModal').classList.add('hidden');
 }
 
-// UX: flash toggle
 async function toggleTorch() {
   if (!htmlScanner) return;
   try {
@@ -535,7 +555,6 @@ function scanToManual() {
 // ============ QTY MODAL ============
 let currentItem = null;
 function openQtyModal(item) {
-  // UX: duplicate detection
   const lastTime = state.recentScans[item.code];
   const now = Date.now();
   if (lastTime && (now - lastTime) < CONFIG.DUP_WINDOW_MIN * 60 * 1000) {
@@ -543,7 +562,7 @@ function openQtyModal(item) {
     const secs = Math.floor(((now - lastTime) % 60000) / 1000);
     const when = mins > 0 ? `${mins} phút` : `${secs} giây`;
     if (!confirm(`⚠️ SKU "${item.name}" vừa nhập ${when} trước.\n\nTiếp tục nhập thêm?`)) {
-      if (state.continuousMode) setTimeout(() => openScanner(), 200);
+      if (state.continuousMode) setTimeout(() => openScanner(), 300);
       return;
     }
   }
@@ -561,7 +580,6 @@ function openQtyModal(item) {
   $('#qtyTotal').value = '';
   $('#qtyProdDate').value = todayISO();
 
-  // UX: show/hide "Copy previous row"
   updateCopyPrevButton();
 
   fillSelect('#qtyProdLine',  CONFIG.PROD_LINES,  state.defaults.line);
@@ -586,7 +604,6 @@ function openQtyModal(item) {
   setTimeout(()=>$('#qtyCases').focus(), 200);
 }
 
-// UX: copy previous row
 function updateCopyPrevButton() {
   const btn = $('#copyPrevBtn');
   if (!btn) return;
@@ -607,10 +624,8 @@ function copyPreviousRow() {
   const shiftSelect = $('#qtyProdShift');
   if (r.prodLine) {
     const inList = CONFIG.PROD_LINES.includes(r.prodLine);
-    if (inList) {
-      lineSelect.value = r.prodLine;
-      $('#qtyProdLineOther').classList.add('hidden-input');
-    } else {
+    if (inList) { lineSelect.value = r.prodLine; $('#qtyProdLineOther').classList.add('hidden-input'); }
+    else {
       lineSelect.value = CONFIG.OTHER_VALUE;
       $('#qtyProdLineOther').value = r.prodLine;
       $('#qtyProdLineOther').classList.remove('hidden-input');
@@ -618,10 +633,8 @@ function copyPreviousRow() {
   }
   if (r.prodShift) {
     const inList = CONFIG.PROD_SHIFTS.includes(r.prodShift);
-    if (inList) {
-      shiftSelect.value = r.prodShift;
-      $('#qtyProdShiftOther').classList.add('hidden-input');
-    } else {
+    if (inList) { shiftSelect.value = r.prodShift; $('#qtyProdShiftOther').classList.add('hidden-input'); }
+    else {
       shiftSelect.value = CONFIG.OTHER_VALUE;
       $('#qtyProdShiftOther').value = r.prodShift;
       $('#qtyProdShiftOther').classList.remove('hidden-input');
@@ -726,23 +739,20 @@ function addToCart() {
     existing.cases += c; existing.packs += p; existing.total += total;
   } else state.cart.push(newRow);
 
-  // UX: save last row
   state.lastRow = { prodDate, prodLine, prodShift, packMachine };
 
   saveSession();
   renderCart();
   closeQtyModal();
 
-  // UX: continuous mode → auto reopen scanner
   if (state.continuousMode) {
     toast('Đã thêm. Đang mở camera...', 'success');
-    setTimeout(() => openScanner(), 350);
+    setTimeout(() => openScanner(), 800);
   } else {
     toast('Đã thêm: ' + currentItem.name, 'success');
   }
 }
 
-// UX: toggle continuous mode
 function toggleContinuous() {
   state.continuousMode = !state.continuousMode;
   localStorage.setItem('kks_continuous', state.continuousMode);
@@ -830,7 +840,6 @@ function exportCSV() {
   toast('Đã xuất CSV', 'success');
 }
 
-// ============ SUBMIT (với offline queue) ============
 async function submitToSheet() {
   if (!CONFIG.APPS_SCRIPT_URL) return toast('Chưa cấu hình endpoint', 'error');
   if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
@@ -846,7 +855,6 @@ async function submitToSheet() {
   };
   const payloadStr = JSON.stringify(payload);
 
-  // Offline → queue
   if (!navigator.onLine) {
     const queue = getOfflineQueue();
     queue.push({ id: Date.now() + Math.random(), payload: payloadStr, timestamp: new Date().toISOString() });
@@ -868,7 +876,6 @@ async function submitToSheet() {
     });
     toast('Đã gửi! (kiểm tra Sheet để xác nhận)', 'success');
   } catch(e) {
-    // Network error even when navigator.onLine = true
     const queue = getOfflineQueue();
     queue.push({ id: Date.now() + Math.random(), payload: payloadStr, timestamp: new Date().toISOString() });
     setOfflineQueue(queue);
@@ -890,6 +897,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#scanBtn').onclick = openScanner;
   $('#closeScanBtn').onclick = closeScanner;
   $('#flashBtn').onclick = toggleTorch;
+  $('#scanErrorCloseBtn').onclick = closeScanner;
 
   $('#searchBtn').onclick = openSearch;
   $('#closeSearchBtn').onclick = closeSearch;
@@ -907,7 +915,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
   $('#qtyCases').addEventListener('input', updateQtyTotal);
   $('#qtyPacks').addEventListener('input', updateQtyTotal);
-  // UX: Enter trong ô cases → nhảy sang packs; Enter trong packs → submit
   $('#qtyCases').addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); $('#qtyPacks').focus(); }
   });
@@ -1029,9 +1036,15 @@ window.addEventListener('DOMContentLoaded', () => {
     <button id="closeScanBtn" class="text-3xl leading-none">✕</button>
   </div>
   <div class="flex-1 flex items-center justify-center p-4">
-    <div id="reader" class="w-full max-w-md bg-black rounded-xl overflow-hidden relative">
+    <div class="w-full max-w-md relative">
+      <div id="reader" class="bg-black rounded-xl overflow-hidden w-full" style="min-height: 280px;"></div>
       <div class="scan-line"></div>
-      <button id="flashBtn" class="hidden absolute top-3 right-3 w-11 h-11 rounded-full bg-white/25 hover:bg-white/40 text-white flex items-center justify-center text-2xl backdrop-blur z-10">🔦</button>
+      <button id="flashBtn" class="hidden absolute top-3 right-3 w-11 h-11 rounded-full bg-white/25 hover:bg-white/40 text-white flex items-center justify-center text-2xl backdrop-blur z-20">🔦</button>
+      <div id="scanError" class="hidden absolute inset-0 flex flex-col items-center justify-center text-white p-6 text-center bg-black rounded-xl z-10">
+        <div class="text-4xl mb-3">⚠️</div>
+        <p id="scanErrorMsg" class="text-sm opacity-90 mb-4"></p>
+        <button id="scanErrorCloseBtn" class="bg-white text-slate-800 px-4 py-2 rounded-lg font-semibold text-sm">Đóng</button>
+      </div>
     </div>
   </div>
   <div class="pb-6 px-4">
@@ -1083,7 +1096,6 @@ window.addEventListener('DOMContentLoaded', () => {
     <h3 id="qtyItemName" class="font-bold text-slate-800 text-lg"></h3>
     <p id="qtyItemMeta" class="text-sm text-slate-500 mt-1"></p>
 
-    <!-- UX: copy previous row -->
     <button id="copyPrevBtn" class="hidden w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">
       📋 Dùng lại: ...
     </button>
