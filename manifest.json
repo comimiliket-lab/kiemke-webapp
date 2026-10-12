@@ -1,20 +1,32 @@
 {
   "name": "Kiểm kê Nhà phân phối",
   "short_name": "KiemKe",
-  "description": "Webapp kiểm kê nhà phân phối SAP B1",
+  "description": "Webapp kiểm kê nhà phân phối Colusa-Miliket",
   "start_url": "./?source=pwa",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#1e40af",
+  "background_color": "#ffffff",
   "theme_color": "#1e40af",
   "lang": "vi",
   "icons": [
     {
-      "src": "./icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "./icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
