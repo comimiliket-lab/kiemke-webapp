@@ -23,16 +23,15 @@
 <!-- ============ CONFIG ============ -->
 <script>
 const CONFIG = {
-  SHEET_ID: '1RBw04by78UQ4-WOOlleSdt8qYsMk3G_LvSb8nSGjjes',
+  SHEET_ID: '1W9Wr6kba9m26oo890PAdTIE31UrAaRRnSyz561CeOHk',
   SHEETS: {
     SO90:  'SO_90 Day',
     ITEMS: 'ItemCode'
   },
-  // Tên cột — khớp chính xác với header Google Sheet
   COLS: {
     DIST_CODE:     'DistributorCode',
     DIST_NAME:     'DistributorName',
-    DIST_ALIAS:    'CustomerReference',  // dùng làm "tên thường gọi"
+    DIST_ALIAS:    'CustomerReference',
     ITEM_CODE:     'ItemCode',
     ITEM_NAME:     'ItemName',
     ITEM_FRGN:     'FrgnName',
@@ -41,7 +40,7 @@ const CONFIG = {
     ITEM_UOM:      'SalUnitMsr',
     ITEM_GROUP:    'ItmsGrpCod'
   },
-  APPS_SCRIPT_URL: '' // endpoint ghi kết quả về Sheet (tuỳ chọn)
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwo-P3P79v9ZgSuM3tJVlNOMlfBmEDWH6bNFRK8_CYG6ION-1xtO_KlgKk2MeOk5GVf/exec'
 };
 
 const gvizURL = (sheet) =>
@@ -49,8 +48,8 @@ const gvizURL = (sheet) =>
 
 // ============ STATE ============
 const state = {
-  distributors: [],   // {code, name, aliases:Set}
-  distributorIndex: new Map(), // key(uppercase) -> distributor object
+  distributors: [],
+  distributorIndex: new Map(),
   items: [],
   itemByBarcode: new Map(),
   itemByCode: new Map(),
@@ -92,13 +91,12 @@ async function boot() {
       loadSheet(CONFIG.SHEETS.ITEMS)
     ]);
 
-    // --- 1) Build danh sách NPP unique từ SO_90 Day ---
-    const dMap = new Map(); // code -> {code, name, aliases:Set}
+    const dMap = new Map();
     so90.forEach(r => {
       const code = (r[CONFIG.COLS.DIST_CODE]||'').trim();
       if (!code) return;
       const name = (r[CONFIG.COLS.DIST_NAME]||'').trim();
-      const alias = (r[CONFIG.COLS.DIST_ALIAS]||'').trim(); // CustomerReference
+      const alias = (r[CONFIG.COLS.DIST_ALIAS]||'').trim();
       if (!dMap.has(code)) dMap.set(code, { code, name, aliases: new Set() });
       const d = dMap.get(code);
       if (name && !d.name) d.name = name;
@@ -106,7 +104,6 @@ async function boot() {
     });
     state.distributors = Array.from(dMap.values());
 
-    // Build index tra cứu: code, name, alias (đều uppercase)
     state.distributorIndex.clear();
     state.distributors.forEach(d => {
       state.distributorIndex.set(normKey(d.code), d);
@@ -116,7 +113,6 @@ async function boot() {
       });
     });
 
-    // --- 2) Load ItemCode ---
     state.items = items.map(r => {
       const code    = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
       const barcode = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
@@ -139,7 +135,6 @@ async function boot() {
       if (it.barcode) state.itemByBarcode.set(normKey(it.barcode), it);
     });
 
-    // --- 3) Restore phiên ---
     const saved = localStorage.getItem('kks_session');
     if (saved) {
       try {
@@ -176,7 +171,6 @@ function doLogin() {
   const key = normKey(q);
   let found = state.distributorIndex.get(key);
 
-  // Nếu không khớp chính xác → thử normalize (bỏ dấu, không phân biệt hoa thường)
   if (!found) {
     const nq = normalize(q);
     found = state.distributors.find(d =>
@@ -273,7 +267,6 @@ function renderSearchResults(q) {
   const nq = normalize(q);
   const box = $('#searchResults');
   if (!q || q.length < 2) {
-    // Gợi ý: hiển thị 30 SKU đầu
     const preview = state.items.slice(0, 30);
     box.innerHTML = `
       <p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">Gợi ý ${preview.length}/${state.items.length} SKU — nhập ≥2 ký tự để tìm</p>
@@ -350,7 +343,6 @@ function addToCart() {
   const p = parseFloat($('#qtyPacks').value) || 0;
   const totalRaw = $('#qtyTotal').value.trim();
   let total;
-  // Nếu user tự sửa ô Tổng mà không nhập thùng/lẻ → dùng giá trị Tổng
   if (totalRaw && c===0 && p===0) {
     total = parseFloat(totalRaw.replace(/\./g,'').replace(/,/g,'')) || 0;
   } else {
@@ -456,7 +448,7 @@ async function submitToSheet() {
   try {
     await fetch(CONFIG.APPS_SCRIPT_URL, {
       method: 'POST', mode: 'no-cors',
-      headers: {'Content-Type':'application/json'},
+      headers: {'Content-Type':'text/plain;charset=utf-8'},
       body: JSON.stringify(payload)
     });
     toast('Đã gửi! (kiểm tra Sheet để xác nhận)', 'success');
