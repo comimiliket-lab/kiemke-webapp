@@ -1,0 +1,20 @@
+{
+  "name": "Kiểm kê Nhà phân phối",
+  "short_name": "KiemKe",
+  "description": "Webapp kiểm kê nhà phân phối SAP B1",
+  "start_url": "./?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1e40af",
+  "theme_color": "#1e40af",
+  "lang": "vi",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
