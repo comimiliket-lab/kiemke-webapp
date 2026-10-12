@@ -1,13 +1,13 @@
 // ============================================================
-// SERVICE WORKER — PWA Kiểm kê (v3)
+// SERVICE WORKER — PWA Kiểm kê (v4)
 // ============================================================
 
-const CACHE_NAME = 'kiemke-v3';
+const CACHE_NAME = 'kiemke-v4';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
-  './icon.svg'
+  './icon.png'
 ];
 
 const SKIP_CACHE_HOSTS = [
