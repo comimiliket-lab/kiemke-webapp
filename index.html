@@ -15,14 +15,13 @@
 <meta name="mobile-web-app-capable" content="yes" />
 
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <style>
   body { -webkit-tap-highlight-color: transparent; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .scan-line { position:absolute; top:10%; left:0; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; pointer-events:none; z-index:15; }
   @keyframes scan { 0%{top:10%} 50%{top:90%} 100%{top:10%} }
-  #reader { min-height: 280px; }
-  #reader video { border-radius: 12px; width: 100% !important; height: auto !important; }
+  #reader { min-height: 280px; background: #000; border-radius: 12px; overflow: hidden; }
+  #scanVideo { width: 100%; height: auto; display: block; }
   .toast { animation: slideIn 0.3s ease-out; }
   @keyframes slideIn { from{transform:translateY(-20px);opacity:0} to{transform:translateY(0);opacity:1} }
   input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
@@ -355,90 +354,110 @@ function renderDistHeader() {
   $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
 }
 
-// ============ SCANNER ============
-let htmlScanner = null;
-let scannerOpening = false;
+// ============ NATIVE SCANNER (BarcodeDetector API) ============
+let scanStream = null;
+let scanRAF = null;
+let barcodeDetector = null;
+let scanVideoEl = null;
+let lastDetected = { code: '', t: 0 };
 
 async function openScanner() {
-  if (scannerOpening) return;
-  scannerOpening = true;
-
   $('#scanModal').classList.remove('hidden');
   $('#scanError').classList.add('hidden');
   $('#flashBtn').classList.add('hidden');
 
-  if (htmlScanner) {
-    try { await htmlScanner.stop(); } catch(_) {}
-    try { await htmlScanner.clear(); } catch(_) {}
-    htmlScanner = null;
+  if (!('BarcodeDetector' in window)) {
+    showScanError('Thiết bị không hỗ trợ quét barcode', 'Dùng nút "Nhập mã SP" bên dưới.');
+    return;
   }
-  $('#reader').innerHTML = '';
 
   try {
-    htmlScanner = new Html5Qrcode('reader', { verbose: false });
-    await htmlScanner.start(
-      { facingMode: { ideal: 'environment' } },
-      { fps: 10, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7 },
-      (decodedText) => onBarcodeDetected(decodedText),
-      () => {}
-    );
+    const reader = $('#reader');
+    reader.innerHTML = '<video id="scanVideo" autoplay playsinline muted style="width:100%;height:auto;border-radius:12px;"></video>';
+    scanVideoEl = document.getElementById('scanVideo');
 
-    setTimeout(() => {
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    scanVideoEl.srcObject = scanStream;
+    await scanVideoEl.play();
+
+    barcodeDetector = new BarcodeDetector({
+      formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','qr_code','data_matrix']
+    });
+
+    const track = scanStream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.torch) $('#flashBtn').classList.remove('hidden');
+
+    const scanLoop = async () => {
+      if (!scanVideoEl || !barcodeDetector) return;
       try {
-        const caps = htmlScanner.getRunningTrackCameraCapabilities();
-        if (caps && caps.torchFeature().isSupported()) {
-          $('#flashBtn').classList.remove('hidden');
+        const codes = await barcodeDetector.detect(scanVideoEl);
+        if (codes.length > 0) {
+          const code = codes[0].rawValue;
+          const now = Date.now();
+          if (code !== lastDetected.code || now - lastDetected.t > 2000) {
+            lastDetected = { code, t: now };
+            if (navigator.vibrate) navigator.vibrate(80);
+            onBarcodeDetected(code);
+            return;
+          }
         }
       } catch(_) {}
-    }, 400);
+      scanRAF = requestAnimationFrame(scanLoop);
+    };
+    scanRAF = requestAnimationFrame(scanLoop);
 
   } catch (e) {
     console.error('Scanner error:', e);
-    showScanError(e.message || 'Không mở được camera');
-  } finally {
-    scannerOpening = false;
+    let msg = 'Không mở được camera';
+    let hint = e.message || e.name || '';
+    if (e.name === 'NotAllowedError') { msg = 'Chưa cấp quyền camera'; hint = 'Bấm 🔒 → Quyền → Camera → Cho phép'; }
+    else if (e.name === 'NotFoundError') { msg = 'Không có camera'; }
+    else if (e.name === 'NotReadableError') { msg = 'Camera đang bị app khác dùng'; hint = 'Đóng Zalo/Camera/Facebook rồi thử lại'; }
+    showScanError(msg, hint);
   }
-}
-
-function showScanError(msg) {
-  $('#scanErrorMsg').textContent = msg;
-  $('#scanError').classList.remove('hidden');
-  $('#flashBtn').classList.add('hidden');
 }
 
 async function closeScanner() {
-  state.torchOn = false;
-  if (htmlScanner) {
-    try { await htmlScanner.stop(); } catch(_) {}
-    try { await htmlScanner.clear(); } catch(_) {}
-    htmlScanner = null;
+  if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
+  if (scanStream) {
+    scanStream.getTracks().forEach(t => t.stop());
+    scanStream = null;
   }
+  scanVideoEl = null;
+  barcodeDetector = null;
+  state.torchOn = false;
   $('#flashBtn').classList.add('hidden');
-  $('#flashBtn').classList.remove('bg-yellow-400', 'text-black');
+  $('#flashBtn').classList.remove('bg-yellow-400','text-black');
   $('#scanError').classList.add('hidden');
   $('#scanModal').classList.add('hidden');
 }
 
 async function toggleTorch() {
-  if (!htmlScanner) return;
+  if (!scanStream) return;
   try {
-    const caps = htmlScanner.getRunningTrackCameraCapabilities();
-    if (!caps || !caps.torchFeature().isSupported()) {
-      toast('Thiết bị không hỗ trợ đèn flash', 'error'); return;
-    }
+    const track = scanStream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (!caps.torch) { toast('Máy không hỗ trợ đèn flash','error'); return; }
     state.torchOn = !state.torchOn;
-    caps.torchFeature().apply(state.torchOn);
+    await track.applyConstraints({ advanced: [{ torch: state.torchOn }] });
     $('#flashBtn').classList.toggle('bg-yellow-400', state.torchOn);
     $('#flashBtn').classList.toggle('text-black', state.torchOn);
-  } catch(e) { toast('Không bật được đèn: ' + e.message, 'error'); }
+  } catch(e) { toast('Không bật được đèn','error'); }
 }
 
-let lastScan = { code: '', t: 0 };
+function showScanError(msg, hint) {
+  $('#scanErrorMsg').textContent = msg;
+  const hintEl = $('#scanErrorHint');
+  if (hintEl) hintEl.textContent = hint || '';
+  $('#scanError').classList.remove('hidden');
+  $('#flashBtn').classList.add('hidden');
+}
+
 function onBarcodeDetected(code) {
-  const now = Date.now();
-  if (code === lastScan.code && now - lastScan.t < 2000) return;
-  lastScan = { code, t: now };
-  if (navigator.vibrate) navigator.vibrate(80);
   const item = state.itemByBarcode.get(normKey(code));
   if (!item) {
     closeScanner().then(() => {
@@ -545,7 +564,7 @@ function submitItemCode() {
   openQtyModal(item);
 }
 function scanToManual() {
-  const lastCode = lastScan.code;
+  const lastCode = lastDetected.code;
   closeScanner().then(() => {
     openItemCodeModal();
     if (lastCode) { $('#itemCodeInput').value = lastCode; onItemCodeInput(); }
@@ -1042,7 +1061,8 @@ window.addEventListener('DOMContentLoaded', () => {
       <button id="flashBtn" class="hidden absolute top-3 right-3 w-11 h-11 rounded-full bg-white/25 hover:bg-white/40 text-white flex items-center justify-center text-2xl backdrop-blur z-20">🔦</button>
       <div id="scanError" class="hidden absolute inset-0 flex flex-col items-center justify-center text-white p-6 text-center bg-black rounded-xl z-10">
         <div class="text-4xl mb-3">⚠️</div>
-        <p id="scanErrorMsg" class="text-sm opacity-90 mb-4"></p>
+        <p id="scanErrorMsg" class="text-sm opacity-90 mb-2 font-semibold"></p>
+        <p id="scanErrorHint" class="text-xs opacity-70 mb-4 leading-relaxed"></p>
         <button id="scanErrorCloseBtn" class="bg-white text-slate-800 px-4 py-2 rounded-lg font-semibold text-sm">Đóng</button>
       </div>
     </div>
