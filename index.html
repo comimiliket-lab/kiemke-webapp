@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Kiểm kê Nhà phân phối</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<style>
+  body { -webkit-tap-highlight-color: transparent; }
+  .scan-line { position:absolute; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; }
+  @keyframes scan { 0%{top:10%} 50%{top:90%} 100%{top:10%} }
+  #reader video { border-radius: 12px; }
+  .toast { animation: slideIn 0.3s ease-out; }
+  @keyframes slideIn { from{transform:translateY(-20px);opacity:0} to{transform:translateY(0);opacity:1} }
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+  input[type=number] { -moz-appearance:textfield; }
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen font-sans">
+
+<!-- ============ CONFIG ============ -->
+<script>
+const CONFIG = {
+  SHEET_ID: '1RBw04by78UQ4-WOOlleSdt8qYsMk3G_LvSb8nSGjjes',
+  SHEETS: {
+    SO90:  'SO_90 Day',
+    ITEMS: 'ItemCode'
+  },
+  // Tên cột — khớp chính xác với header Google Sheet
+  COLS: {
+    DIST_CODE:     'DistributorCode',
+    DIST_NAME:     'DistributorName',
+    DIST_ALIAS:    'CustomerReference',  // dùng làm "tên thường gọi"
+    ITEM_CODE:     'ItemCode',
+    ITEM_NAME:     'ItemName',
+    ITEM_FRGN:     'FrgnName',
+    ITEM_BARCODE:  'CodeBars',
+    ITEM_NUMINSALE:'NumInSale',
+    ITEM_UOM:      'SalUnitMsr',
+    ITEM_GROUP:    'ItmsGrpCod'
+  },
+  APPS_SCRIPT_URL: '' // endpoint ghi kết quả về Sheet (tuỳ chọn)
+};
+
+const gvizURL = (sheet) =>
+  `https://docs.google.com/spreadsheets/d/${CONFIG.SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheet)}`;
+
+// ============ STATE ============
+const state = {
+  distributors: [],   // {code, name, aliases:Set}
+  distributorIndex: new Map(), // key(uppercase) -> distributor object
+  items: [],
+  itemByBarcode: new Map(),
+  itemByCode: new Map(),
+  currentDistributor: null,
+  cart: []
+};
+
+// ============ UTILS ============
+const $  = (s) => document.querySelector(s);
+const fmt = (n) => Number(n||0).toLocaleString('vi-VN');
+const toast = (msg, type='info') => {
+  const el = document.createElement('div');
+  const color = type==='error'?'bg-red-500':type==='success'?'bg-green-600':'bg-slate-800';
+  el.className = `toast fixed top-4 left-1/2 -translate-x-1/2 ${color} text-white px-4 py-2 rounded-lg shadow-lg z-[9999] text-sm`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(), 2500);
+};
+const normalize = (s) => (s||'').toString().trim().toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
+const normKey = (s) => (s||'').toString().trim().toUpperCase();
+
+// ============ LOAD DATA ============
+async function loadSheet(name) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(gvizURL(name), {
+      download: true, header: true, skipEmptyLines: true,
+      complete: (res) => resolve(res.data),
+      error: reject
+    });
+  });
+}
+
+async function boot() {
+  try {
+    showScreen('loading');
+    const [so90, items] = await Promise.all([
+      loadSheet(CONFIG.SHEETS.SO90),
+      loadSheet(CONFIG.SHEETS.ITEMS)
+    ]);
+
+    // --- 1) Build danh sách NPP unique từ SO_90 Day ---
+    const dMap = new Map(); // code -> {code, name, aliases:Set}
+    so90.forEach(r => {
+      const code = (r[CONFIG.COLS.DIST_CODE]||'').trim();
+      if (!code) return;
+      const name = (r[CONFIG.COLS.DIST_NAME]||'').trim();
+      const alias = (r[CONFIG.COLS.DIST_ALIAS]||'').trim(); // CustomerReference
+      if (!dMap.has(code)) dMap.set(code, { code, name, aliases: new Set() });
+      const d = dMap.get(code);
+      if (name && !d.name) d.name = name;
+      if (alias) d.aliases.add(alias);
+    });
+    state.distributors = Array.from(dMap.values());
+
+    // Build index tra cứu: code, name, alias (đều uppercase)
+    state.distributorIndex.clear();
+    state.distributors.forEach(d => {
+      state.distributorIndex.set(normKey(d.code), d);
+      if (d.name) state.distributorIndex.set(normKey(d.name), d);
+      d.aliases.forEach(a => {
+        if (!state.distributorIndex.has(normKey(a))) state.distributorIndex.set(normKey(a), d);
+      });
+    });
+
+    // --- 2) Load ItemCode ---
+    state.items = items.map(r => {
+      const code    = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
+      const barcode = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
+      const nis     = parseFloat(r[CONFIG.COLS.ITEM_NUMINSALE]) || 1;
+      return {
+        code,
+        name:  (r[CONFIG.COLS.ITEM_NAME]||'').trim(),
+        frgn:  (r[CONFIG.COLS.ITEM_FRGN]||'').trim(),
+        barcode,
+        numInSale: nis > 0 ? nis : 1,
+        uom:   (r[CONFIG.COLS.ITEM_UOM]||'').trim(),
+        group: (r[CONFIG.COLS.ITEM_GROUP]||'').trim()
+      };
+    }).filter(i => i.code);
+
+    state.itemByBarcode.clear();
+    state.itemByCode.clear();
+    state.items.forEach(it => {
+      state.itemByCode.set(normKey(it.code), it);
+      if (it.barcode) state.itemByBarcode.set(normKey(it.barcode), it);
+    });
+
+    // --- 3) Restore phiên ---
+    const saved = localStorage.getItem('kks_session');
+    if (saved) {
+      try {
+        const s = JSON.parse(saved);
+        state.currentDistributor = s.currentDistributor;
+        state.cart = s.cart || [];
+        showScreen('main');
+        renderDistHeader();
+        renderCart();
+      } catch(_) { showScreen('login'); }
+    } else {
+      showScreen('login');
+    }
+    toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU`, 'success');
+  } catch (e) {
+    console.error(e);
+    toast('Lỗi tải dữ liệu. Kiểm tra quyền Publish Sheet.', 'error');
+    showScreen('login');
+  }
+}
+
+// ============ SCREENS ============
+function showScreen(name) {
+  ['loading','login','main'].forEach(s => {
+    const el = document.getElementById('screen-'+s);
+    if (el) el.classList.toggle('hidden', s!==name);
+  });
+}
+
+// ============ LOGIN ============
+function doLogin() {
+  const q = $('#loginInput').value.trim();
+  if (!q) return toast('Nhập mã hoặc tên NPP', 'error');
+  const key = normKey(q);
+  let found = state.distributorIndex.get(key);
+
+  // Nếu không khớp chính xác → thử normalize (bỏ dấu, không phân biệt hoa thường)
+  if (!found) {
+    const nq = normalize(q);
+    found = state.distributors.find(d =>
+      normalize(d.code) === nq ||
+      normalize(d.name) === nq ||
+      Array.from(d.aliases).some(a => normalize(a) === nq)
+    );
+  }
+  if (!found) return toast('Không tìm thấy NPP: ' + q, 'error');
+
+  state.currentDistributor = found;
+  state.cart = [];
+  saveSession();
+  showScreen('main');
+  renderDistHeader();
+  renderCart();
+}
+
+function logout() {
+  if (!confirm('Kết thúc phiên kiểm kê hiện tại?')) return;
+  state.currentDistributor = null;
+  state.cart = [];
+  localStorage.removeItem('kks_session');
+  showScreen('login');
+  $('#loginInput').value = '';
+}
+
+function saveSession() {
+  localStorage.setItem('kks_session', JSON.stringify({
+    currentDistributor: state.currentDistributor,
+    cart: state.cart
+  }));
+}
+
+function renderDistHeader() {
+  const d = state.currentDistributor;
+  $('#distCode').textContent = d.code;
+  const aliases = Array.from(d.aliases || []).slice(0,2).join(' • ');
+  $('#distName').textContent = d.name || '(không tên)';
+  $('#distAlias').textContent = aliases ? `(${aliases})` : '';
+}
+
+// ============ SCANNER ============
+let htmlScanner = null;
+
+async function openScanner() {
+  $('#scanModal').classList.remove('hidden');
+  try {
+    htmlScanner = new Html5Qrcode('reader');
+    const config = { fps: 10, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7 };
+    await htmlScanner.start(
+      { facingMode: 'environment' },
+      config,
+      (decodedText) => onBarcodeDetected(decodedText),
+      () => {}
+    );
+  } catch (e) {
+    console.error(e);
+    toast('Không mở được camera: ' + e.message, 'error');
+    closeScanner();
+  }
+}
+
+async function closeScanner() {
+  if (htmlScanner) {
+    try { await htmlScanner.stop(); await htmlScanner.clear(); } catch(_) {}
+    htmlScanner = null;
+  }
+  $('#scanModal').classList.add('hidden');
+}
+
+let lastScan = { code: '', t: 0 };
+function onBarcodeDetected(code) {
+  const now = Date.now();
+  if (code === lastScan.code && now - lastScan.t < 2000) return;
+  lastScan = { code, t: now };
+
+  if (navigator.vibrate) navigator.vibrate(80);
+  const item = state.itemByBarcode.get(normKey(code));
+  if (!item) { toast('Barcode chưa có trong ItemCode: ' + code, 'error'); return; }
+  closeScanner().then(() => openQtyModal(item));
+}
+
+// ============ SEARCH ============
+function openSearch() {
+  $('#searchModal').classList.remove('hidden');
+  $('#searchInput').value = '';
+  renderSearchResults('');
+  setTimeout(()=>$('#searchInput').focus(), 100);
+}
+function closeSearch() { $('#searchModal').classList.add('hidden'); }
+
+function renderSearchResults(q) {
+  const nq = normalize(q);
+  const box = $('#searchResults');
+  if (!q || q.length < 2) {
+    // Gợi ý: hiển thị 30 SKU đầu
+    const preview = state.items.slice(0, 30);
+    box.innerHTML = `
+      <p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">Gợi ý ${preview.length}/${state.items.length} SKU — nhập ≥2 ký tự để tìm</p>
+      ${preview.map(it => rowHTML(it)).join('')}
+    `;
+    return;
+  }
+  const hits = state.items.filter(it =>
+    normalize(it.name).includes(nq) ||
+    normalize(it.frgn).includes(nq) ||
+    normalize(it.code).includes(nq)
+  ).slice(0, 100);
+  if (!hits.length) { box.innerHTML = '<p class="text-slate-400 text-sm p-4">Không tìm thấy.</p>'; return; }
+  box.innerHTML = `<p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">${hits.length} kết quả</p>`
+    + hits.map(it => rowHTML(it)).join('');
+}
+
+function rowHTML(it) {
+  const code = it.code.replace(/"/g,'&quot;');
+  return `
+    <button class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100"
+      onclick='pickSearchResult("${code}")'>
+      <div class="font-semibold text-slate-800 text-sm">${it.name || '(không tên)'}</div>
+      ${it.frgn && it.frgn!==it.name ? `<div class="text-xs text-slate-400 italic">${it.frgn}</div>` : ''}
+      <div class="text-xs text-slate-500 mt-0.5">
+        <span class="font-mono">${it.code}</span>
+        ${it.barcode ? ' • BC: '+it.barcode : ' • <span class="text-amber-600">không BC</span>'}
+        • 1 thùng = ${fmt(it.numInSale)} ${it.uom||'sp'}
+      </div>
+    </button>`;
+}
+
+function pickSearchResult(code) {
+  const item = state.itemByCode.get(normKey(code));
+  if (!item) return;
+  closeSearch();
+  openQtyModal(item);
+}
+
+// ============ QTY MODAL ============
+let currentItem = null;
+
+function openQtyModal(item) {
+  currentItem = item;
+  $('#qtyItemName').textContent = item.name || '(không tên)';
+  $('#qtyItemMeta').innerHTML = `
+    <span class="font-mono">${item.code}</span>
+    ${item.barcode ? ' • BC: <span class="font-mono">'+item.barcode+'</span>' : ' • <span class="text-amber-600">Không barcode</span>'}
+    • 1 thùng = <b>${fmt(item.numInSale)}</b> ${item.uom || 'sp'}
+  `;
+  $('#qtyCases').value = '';
+  $('#qtyPacks').value = '';
+  $('#qtyTotal').value = '';
+  updateQtyTotal();
+  $('#qtyModal').classList.remove('hidden');
+  setTimeout(()=>$('#qtyCases').focus(), 200);
+}
+
+function closeQtyModal() { $('#qtyModal').classList.add('hidden'); currentItem = null; }
+
+function updateQtyTotal() {
+  if (!currentItem) return;
+  const c = parseFloat($('#qtyCases').value) || 0;
+  const p = parseFloat($('#qtyPacks').value) || 0;
+  const total = c * currentItem.numInSale + p;
+  if (c || p) $('#qtyTotal').value = fmt(total);
+  $('#qtyBreakdown').textContent =
+    `${fmt(c)} thùng × ${fmt(currentItem.numInSale)} + ${fmt(p)} lẻ = ${fmt(total)} ${currentItem.uom || 'sp'}`;
+}
+
+function addToCart() {
+  if (!currentItem) return;
+  const c = parseFloat($('#qtyCases').value) || 0;
+  const p = parseFloat($('#qtyPacks').value) || 0;
+  const totalRaw = $('#qtyTotal').value.trim();
+  let total;
+  // Nếu user tự sửa ô Tổng mà không nhập thùng/lẻ → dùng giá trị Tổng
+  if (totalRaw && c===0 && p===0) {
+    total = parseFloat(totalRaw.replace(/\./g,'').replace(/,/g,'')) || 0;
+  } else {
+    total = c * currentItem.numInSale + p;
+  }
+  if (total <= 0) return toast('Số lượng phải > 0', 'error');
+
+  const existing = state.cart.find(x => x.itemCode === currentItem.code);
+  if (existing) {
+    existing.cases += c;
+    existing.packs += p;
+    existing.total += total;
+  } else {
+    state.cart.push({
+      itemCode: currentItem.code,
+      itemName: currentItem.name,
+      barcode: currentItem.barcode,
+      numInSale: currentItem.numInSale,
+      uom: currentItem.uom,
+      cases: c, packs: p, total
+    });
+  }
+  saveSession();
+  renderCart();
+  closeQtyModal();
+  toast('Đã thêm: ' + currentItem.name, 'success');
+}
+
+// ============ CART ============
+function renderCart() {
+  const box = $('#cartList');
+  $('#cartCount').textContent = state.cart.length;
+  if (!state.cart.length) {
+    box.innerHTML = '<p class="text-center text-slate-400 py-12">Chưa có sản phẩm. Quét barcode hoặc tìm theo tên.</p>';
+    updateSummary(); return;
+  }
+  box.innerHTML = state.cart.map((x, i) => `
+    <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200 flex items-start gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-slate-800 text-sm truncate">${x.itemName||'(không tên)'}</div>
+        <div class="text-xs text-slate-500 mt-0.5">
+          <span class="font-mono">${x.itemCode}</span>
+          ${x.barcode ? ' • BC: '+x.barcode : ''}
+        </div>
+        <div class="text-xs text-slate-600 mt-1">
+          <span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">${fmt(x.cases)} thùng</span>
+          <span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded ml-1">${fmt(x.packs)} lẻ</span>
+          <span class="ml-1 text-slate-500">(1T=${fmt(x.numInSale)})</span>
+        </div>
+      </div>
+      <div class="text-right">
+        <div class="font-bold text-blue-700">${fmt(x.total)}</div>
+        <div class="text-[10px] text-slate-400">${x.uom||'sp'}</div>
+        <button onclick="removeCart(${i})" class="text-red-500 text-xs mt-1">✕ Xoá</button>
+      </div>
+    </div>`).join('');
+  updateSummary();
+}
+
+function removeCart(i) {
+  if (!confirm('Xoá dòng này?')) return;
+  state.cart.splice(i,1);
+  saveSession();
+  renderCart();
+}
+
+function updateSummary() {
+  const totalQty = state.cart.reduce((s,x)=>s+x.total,0);
+  $('#sumSkus').textContent = state.cart.length;
+  $('#sumQty').textContent = fmt(totalQty);
+}
+
+// ============ EXPORT ============
+function exportCSV() {
+  if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
+  const d = state.currentDistributor;
+  const rows = [
+    ['DistributorCode','DistributorName','ItemCode','ItemName','CodeBars','NumInSale','SalUnitMsr',
+     'Cases','Packs','Total','Timestamp'],
+    ...state.cart.map(x => [
+      d.code, d.name, x.itemCode, x.itemName, x.barcode, x.numInSale, x.uom,
+      x.cases, x.packs, x.total, new Date().toISOString()
+    ])
+  ];
+  const csv = Papa.unparse(rows);
+  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `KiemKe_${d.code}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  toast('Đã xuất CSV', 'success');
+}
+
+async function submitToSheet() {
+  if (!CONFIG.APPS_SCRIPT_URL) return toast('Chưa cấu hình endpoint Apps Script', 'error');
+  if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
+  if (!confirm('Gửi kết quả kiểm kê về Google Sheet?')) return;
+  const payload = {
+    distributor: state.currentDistributor,
+    items: state.cart,
+    timestamp: new Date().toISOString()
+  };
+  try {
+    await fetch(CONFIG.APPS_SCRIPT_URL, {
+      method: 'POST', mode: 'no-cors',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    toast('Đã gửi! (kiểm tra Sheet để xác nhận)', 'success');
+  } catch(e) { toast('Lỗi gửi: '+e.message, 'error'); }
+}
+
+// ============ BIND ============
+window.addEventListener('DOMContentLoaded', () => {
+  $('#loginBtn').onclick = doLogin;
+  $('#loginInput').addEventListener('keydown', e => e.key==='Enter' && doLogin());
+  $('#logoutBtn').onclick = logout;
+
+  $('#scanBtn').onclick = openScanner;
+  $('#closeScanBtn').onclick = closeScanner;
+
+  $('#searchBtn').onclick = openSearch;
+  $('#closeSearchBtn').onclick = closeSearch;
+  $('#searchInput').addEventListener('input', e => renderSearchResults(e.target.value));
+
+  $('#qtyCases').addEventListener('input', updateQtyTotal);
+  $('#qtyPacks').addEventListener('input', updateQtyTotal);
+  $('#qtyCancelBtn').onclick = closeQtyModal;
+  $('#qtyAddBtn').onclick = addToCart;
+
+  $('#exportBtn').onclick = exportCSV;
+  $('#submitBtn').onclick = submitToSheet;
+
+  boot();
+});
+</script>
+
+<!-- ============ SCREEN: LOADING ============ -->
+<div id="screen-loading" class="hidden fixed inset-0 bg-white flex flex-col items-center justify-center z-50">
+  <div class="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+  <p class="mt-4 text-slate-600">Đang tải dữ liệu từ Google Sheet...</p>
+</div>
+
+<!-- ============ SCREEN: LOGIN ============ -->
+<div id="screen-login" class="hidden min-h-screen flex items-center justify-center p-4">
+  <div class="w-full max-w-md bg-white rounded-2xl shadow-xl p-6">
+    <div class="text-center mb-6">
+      <div class="w-16 h-16 mx-auto bg-blue-100 rounded-full flex items-center justify-center text-3xl">📦</div>
+      <h1 class="text-xl font-bold text-slate-800 mt-3">Kiểm kê Nhà phân phối</h1>
+      <p class="text-sm text-slate-500">Nhập mã, tên, hoặc tên thường gọi</p>
+    </div>
+    <input id="loginInput" type="text" autocomplete="off"
+      placeholder="VD: NPP001, Công ty ABC, Bà Tư..."
+      class="w-full border border-slate-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500" />
+    <button id="loginBtn"
+      class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl mt-4 transition">
+      Đăng nhập
+    </button>
+    <p class="text-xs text-slate-400 text-center mt-4">Dữ liệu tải từ Google Sheet • Hỗ trợ offline sau lần đầu</p>
+  </div>
+</div>
+
+<!-- ============ SCREEN: MAIN ============ -->
+<div id="screen-main" class="hidden min-h-screen pb-32">
+  <header class="bg-blue-700 text-white sticky top-0 z-30 shadow-md">
+    <div class="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
+      <div class="min-w-0">
+        <div class="text-xs opacity-80">Nhà phân phối</div>
+        <div id="distCode" class="font-mono text-sm opacity-90"></div>
+        <div id="distName" class="font-bold truncate"></div>
+        <div id="distAlias" class="text-xs opacity-75 truncate"></div>
+      </div>
+      <button id="logoutBtn" class="text-xs bg-blue-800 hover:bg-blue-900 px-3 py-2 rounded-lg whitespace-nowrap">
+        Đăng xuất
+      </button>
+    </div>
+  </header>
+
+  <main class="max-w-2xl mx-auto p-4 space-y-4">
+    <div class="grid grid-cols-2 gap-3">
+      <button id="scanBtn"
+        class="bg-red-500 hover:bg-red-600 text-white font-semibold py-4 rounded-xl shadow flex flex-col items-center gap-1">
+        <span class="text-2xl">📷</span>
+        <span class="text-sm">Quét Barcode</span>
+      </button>
+      <button id="searchBtn"
+        class="bg-slate-700 hover:bg-slate-800 text-white font-semibold py-4 rounded-xl shadow flex flex-col items-center gap-1">
+        <span class="text-2xl">🔍</span>
+        <span class="text-sm">Tìm theo tên</span>
+      </button>
+    </div>
+
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 grid grid-cols-2 gap-3 text-center">
+      <div>
+        <div class="text-xs text-slate-500">Số SKU</div>
+        <div id="sumSkus" class="text-2xl font-bold text-slate-800">0</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500">Tổng số lượng</div>
+        <div id="sumQty" class="text-2xl font-bold text-blue-700">0</div>
+      </div>
+    </div>
+
+    <h2 class="font-semibold text-slate-700 flex items-center gap-2">
+      Danh sách đã kiểm
+      <span id="cartCount" class="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full">0</span>
+    </h2>
+    <div id="cartList" class="space-y-2"></div>
+  </main>
+
+  <div class="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-2xl z-30">
+    <div class="max-w-2xl mx-auto p-3 grid grid-cols-2 gap-3">
+      <button id="exportBtn" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-xl">
+        ⬇ Xuất CSV
+      </button>
+      <button id="submitBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">
+        ☁ Gửi Sheet
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: SCANNER ============ -->
+<div id="scanModal" class="hidden fixed inset-0 bg-black z-50 flex flex-col">
+  <div class="flex items-center justify-between p-4 text-white">
+    <h3 class="font-semibold">Quét barcode</h3>
+    <button id="closeScanBtn" class="text-3xl leading-none">✕</button>
+  </div>
+  <div class="flex-1 flex items-center justify-center p-4">
+    <div id="reader" class="w-full max-w-md bg-black rounded-xl overflow-hidden relative">
+      <div class="scan-line"></div>
+    </div>
+  </div>
+  <p class="text-center text-white/70 text-sm pb-6">Đưa barcode vào khung • Tự động nhận diện</p>
+</div>
+
+<!-- ============ MODAL: SEARCH ============ -->
+<div id="searchModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl max-h-[85vh] flex flex-col">
+    <div class="p-4 border-b border-slate-200 flex items-center gap-2">
+      <input id="searchInput" type="text" placeholder="Tìm theo ItemName / FrgnName / ItemCode..."
+        class="flex-1 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      <button id="closeSearchBtn" class="text-2xl text-slate-500 px-2">✕</button>
+    </div>
+    <div id="searchResults" class="overflow-y-auto flex-1"></div>
+  </div>
+</div>
+
+<!-- ============ MODAL: QUANTITY ============ -->
+<div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5">
+    <h3 id="qtyItemName" class="font-bold text-slate-800 text-lg"></h3>
+    <p id="qtyItemMeta" class="text-sm text-slate-500 mt-1"></p>
+
+    <div class="grid grid-cols-2 gap-3 mt-5">
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Số thùng</label>
+        <input id="qtyCases" type="number" inputmode="numeric" min="0" placeholder="0"
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
+        <input id="qtyPacks" type="number" inputmode="numeric" min="0" placeholder="0"
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+      </div>
+    </div>
+
+    <div class="mt-4 bg-slate-50 rounded-lg p-3">
+      <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
+      <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
+        class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg font-bold text-blue-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+      <p id="qtyBreakdown" class="text-xs text-slate-500 mt-2"></p>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mt-5">
+      <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
+      <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Thêm</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
