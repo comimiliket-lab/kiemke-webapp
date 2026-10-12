@@ -1,9 +1,8 @@
 // ============================================================
-// SERVICE WORKER — PWA Kiểm kê (v2)
-// Không cache CDN library → luôn fetch mới
+// SERVICE WORKER — PWA Kiểm kê (v3)
 // ============================================================
 
-const CACHE_NAME = 'kiemke-v2';
+const CACHE_NAME = 'kiemke-v3';
 const APP_SHELL = [
   './',
   './index.html',
@@ -14,7 +13,6 @@ const APP_SHELL = [
 const SKIP_CACHE_HOSTS = [
   'docs.google.com',
   'script.google.com',
-  'unpkg.com',
   'cdn.jsdelivr.net',
   'cdn.tailwindcss.com'
 ];
