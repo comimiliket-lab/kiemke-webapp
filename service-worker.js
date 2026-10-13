@@ -1,8 +1,8 @@
 // ============================================================
-// SERVICE WORKER — PWA Kiểm kê (v4)
+// SERVICE WORKER — PWA Kiểm kê (v5)
 // ============================================================
 
-const CACHE_NAME = 'kiemke-v4';
+const CACHE_NAME = 'kiemke-v5';
 const APP_SHELL = [
   './',
   './index.html',
