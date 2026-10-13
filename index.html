@@ -98,6 +98,7 @@ const state = {
   itemByPosCsCode: new Map(),
   itemByCode: new Map(),
   currentDistributor: null, currentUser: null, sessionId: null, cart: [],
+  editingIndex: null,
   defaults: { line: CONFIG.DEFAULT_LINE, shift: CONFIG.DEFAULT_SHIFT, machine: CONFIG.DEFAULT_MACHINE },
   recentScans: {},
   lastRow: null,
@@ -115,6 +116,14 @@ const toast = (msg, type='info') => {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(()=>el.remove(), 2500);
+};
+const toastLong = (msg, type='info', duration=3500) => {
+  const el = document.createElement('div');
+  const color = type==='error'?'bg-red-500':type==='success'?'bg-green-600':type==='warn'?'bg-amber-500':'bg-slate-800';
+  el.className = `toast fixed top-4 left-1/2 -translate-x-1/2 ${color} text-white px-4 py-3 rounded-lg shadow-2xl z-[9999] text-sm max-w-[90vw] font-semibold text-center leading-snug`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(), duration);
 };
 const normalize = (s) => (s||'').toString().trim().toLowerCase()
   .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
@@ -356,7 +365,7 @@ function doLogin() {
 function logout() {
   if (!confirm('Kết thúc phiên?')) return;
   state.currentDistributor = null; state.currentUser = null; state.sessionId = null; state.cart = [];
-  state.recentScans = {}; state.lastRow = null;
+  state.recentScans = {}; state.lastRow = null; state.editingIndex = null;
   localStorage.removeItem('kks_session');
   showScreen('login');
   $('#loginUser').value = ''; $('#loginPhone').value = ''; $('#loginInput').value = '';
@@ -377,17 +386,21 @@ function saveProdDefaults() {
 function renderDistHeader() {
   const d = state.currentDistributor;
   const u = state.currentUser || {};
-  $('#distCode').textContent = d.code;
+  const name = d.name || '(không tên)';
   const aliases = Array.from(d.aliases || []).slice(0,2).join(' • ');
-  $('#distName').textContent = d.name || '(không tên)';
+
+  $('#distCodeCompact').textContent = d.code;
+  $('#distNameCompact').textContent = name;
+  $('#distName').textContent = name;
   $('#distAlias').textContent = aliases ? `(${aliases})` : '';
   $('#userInfo').textContent = u.name ? `👤 ${u.name} • 📞 ${u.phone}` : '';
   $('#sessionInfo').textContent = state.sessionId ? `🔑 ${state.sessionId}` : '';
+
   $('#continuousBtn').classList.toggle('bg-green-500', state.continuousMode);
   $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
 }
 
-// ============ NATIVE SCANNER (BarcodeDetector API) ============
+// ============ NATIVE SCANNER ============
 let scanStream = null;
 let scanRAF = null;
 let barcodeDetector = null;
@@ -416,7 +429,6 @@ async function openScanner() {
     scanVideoEl.srcObject = scanStream;
     await scanVideoEl.play();
 
-    // === FIX: lọc format được máy hỗ trợ ===
     const wanted = ['ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','codabar','itf','qr_code','data_matrix','pdf417','aztec'];
     let supported = wanted.slice();
     try {
@@ -512,11 +524,13 @@ function onBarcodeDetected(code) {
     const codeType = code.length === 14 ? 'ITF-14 (thùng)' : (code.length === 13 ? 'EAN-13' : '');
     closeScanner().then(() => {
       openItemCodeModal(code, codeType);
-      toast('Không tìm thấy: ' + code, 'error');
+      toast('❌ Không tìm thấy: ' + code, 'error');
     });
     return;
   }
   found.item._matchedType = found.type;
+  const typeLabel = found.type === 'poscs' ? '📦 CS 14 số' : '📷 BC 13 số';
+  toastLong(`${typeLabel} → ${found.item.name}`, 'success');
   closeScanner().then(() => openQtyModal(found.item));
 }
 
@@ -565,6 +579,7 @@ function rowHTML(it) {
 function pickSearchResult(code) {
   const item = state.itemByCode.get(normKey(code));
   if (!item) return;
+  toastLong(`🔍 → ${item.name}`, 'success');
   closeSearch();
   openQtyModal(item);
 }
@@ -633,6 +648,7 @@ function submitItemCode() {
   if (!code) return toast('Nhập mã sản phẩm', 'error');
   const item = state.itemByCode.get(normKey(code));
   if (!item) return toast('Không tìm thấy mã: ' + code, 'error');
+  toastLong(`⌨️ → ${item.name}`, 'success');
   closeItemCodeModal();
   openQtyModal(item);
 }
@@ -650,29 +666,47 @@ function gotoSearchFromItemCode() {
 
 // ============ QTY MODAL ============
 let currentItem = null;
-function openQtyModal(item) {
-  const lastTime = state.recentScans[item.code];
-  const now = Date.now();
-  if (lastTime && (now - lastTime) < CONFIG.DUP_WINDOW_MIN * 60 * 1000) {
-    const mins = Math.floor((now - lastTime) / 60000);
-    const secs = Math.floor(((now - lastTime) % 60000) / 1000);
-    const when = mins > 0 ? `${mins} phút` : `${secs} giây`;
-    if (!confirm(`⚠️ SKU "${item.name}" vừa nhập ${when} trước.\n\nTiếp tục nhập thêm?`)) {
-      if (state.continuousMode) setTimeout(() => openScanner(), 300);
-      return;
+
+function openQtyModal(item, prefillRow) {
+  const isEdit = !!prefillRow;
+
+  if (!isEdit) state.editingIndex = null;
+
+  if (!isEdit) {
+    const lastTime = state.recentScans[item.code];
+    const now = Date.now();
+    if (lastTime && (now - lastTime) < CONFIG.DUP_WINDOW_MIN * 60 * 1000) {
+      const mins = Math.floor((now - lastTime) / 60000);
+      const secs = Math.floor(((now - lastTime) % 60000) / 1000);
+      const when = mins > 0 ? `${mins} phút` : `${secs} giây`;
+      if (!confirm(`⚠️ SKU "${item.name}" vừa nhập ${when} trước.\n\nTiếp tục nhập thêm?`)) {
+        if (state.continuousMode) setTimeout(() => openScanner(), 300);
+        return;
+      }
     }
+    state.recentScans[item.code] = now;
   }
-  state.recentScans[item.code] = now;
 
   currentItem = item;
 
   let scanTypeBadge = '';
-  if (item._matchedType === 'poscs') {
-    scanTypeBadge = '<span class="badge-type badge-poscs">📦 CS 14 số</span>';
-  } else if (item._matchedType === 'barcode') {
-    scanTypeBadge = '<span class="badge-type badge-barcode">📷 BC 13 số</span>';
-  }
+  if (item._matchedType === 'poscs') scanTypeBadge = '<span class="badge-type badge-poscs">📦 CS 14 số</span>';
+  else if (item._matchedType === 'barcode') scanTypeBadge = '<span class="badge-type badge-barcode">📷 BC 13 số</span>';
   item._matchedType = null;
+
+  const modeBadge = $('#qtyModalMode');
+  const addBtn = $('#qtyAddBtn');
+  if (isEdit) {
+    modeBadge.classList.remove('hidden');
+    addBtn.textContent = '💾 Lưu thay đổi';
+    addBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+    addBtn.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+  } else {
+    modeBadge.classList.add('hidden');
+    addBtn.textContent = 'Thêm';
+    addBtn.classList.remove('bg-emerald-600', 'hover:bg-emerald-700');
+    addBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+  }
 
   $('#qtyItemName').textContent = item.name || '(không tên)';
   const bcLine = [];
@@ -684,30 +718,70 @@ function openQtyModal(item) {
     • 1 thùng = <b>${fmt(item.numInSale)}</b> ${item.uom || 'sp'}
     ${scanTypeBadge}
   `;
-  $('#qtyCases').value = '';
-  $('#qtyPacks').value = '';
-  $('#qtyTotal').value = '';
-  $('#qtyProdDate').value = todayISO();
 
-  updateCopyPrevButton();
+  if (isEdit) {
+    $('#qtyCases').value = prefillRow.cases || '';
+    $('#qtyPacks').value = prefillRow.packs || '';
+    $('#qtyTotal').value = prefillRow.total ? fmt(prefillRow.total) : '';
+    $('#qtyProdDate').value = prefillRow.prodDate || todayISO();
 
-  fillSelect('#qtyProdLine',  CONFIG.PROD_LINES,  state.defaults.line);
-  fillSelect('#qtyProdShift', CONFIG.PROD_SHIFTS, state.defaults.shift);
-  $('#qtyProdLineOther').value = '';
-  $('#qtyProdShiftOther').value = '';
-  $('#qtyProdLineOther').classList.add('hidden-input');
-  $('#qtyProdShiftOther').classList.add('hidden-input');
-  if (state.defaults.line === CONFIG.OTHER_VALUE && state.defaults.lineCustom) {
-    $('#qtyProdLineOther').value = state.defaults.lineCustom;
-    $('#qtyProdLineOther').classList.remove('hidden-input');
+    fillSelect('#qtyProdLine', CONFIG.PROD_LINES, '');
+    $('#qtyProdLineOther').value = '';
+    $('#qtyProdLineOther').classList.add('hidden-input');
+    if (prefillRow.prodLine) {
+      if (CONFIG.PROD_LINES.includes(prefillRow.prodLine)) {
+        $('#qtyProdLine').value = prefillRow.prodLine;
+      } else {
+        $('#qtyProdLine').value = CONFIG.OTHER_VALUE;
+        $('#qtyProdLineOther').value = prefillRow.prodLine;
+        $('#qtyProdLineOther').classList.remove('hidden-input');
+      }
+    }
+
+    fillSelect('#qtyProdShift', CONFIG.PROD_SHIFTS, '');
+    $('#qtyProdShiftOther').value = '';
+    $('#qtyProdShiftOther').classList.add('hidden-input');
+    if (prefillRow.prodShift) {
+      if (CONFIG.PROD_SHIFTS.includes(prefillRow.prodShift)) {
+        $('#qtyProdShift').value = prefillRow.prodShift;
+      } else {
+        $('#qtyProdShift').value = CONFIG.OTHER_VALUE;
+        $('#qtyProdShiftOther').value = prefillRow.prodShift;
+        $('#qtyProdShiftOther').classList.remove('hidden-input');
+      }
+    }
+
+    fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, prefillRow.packMachine || '');
+
+    const skip = !prefillRow.prodLine && !prefillRow.prodShift && !prefillRow.packMachine;
+    $('#skipProdInfo').checked = skip;
+    toggleSkipProdInfo();
+  } else {
+    $('#qtyCases').value = '';
+    $('#qtyPacks').value = '';
+    $('#qtyTotal').value = '';
+    $('#qtyProdDate').value = todayISO();
+    updateCopyPrevButton();
+
+    fillSelect('#qtyProdLine',  CONFIG.PROD_LINES,  state.defaults.line);
+    fillSelect('#qtyProdShift', CONFIG.PROD_SHIFTS, state.defaults.shift);
+    $('#qtyProdLineOther').value = '';
+    $('#qtyProdShiftOther').value = '';
+    $('#qtyProdLineOther').classList.add('hidden-input');
+    $('#qtyProdShiftOther').classList.add('hidden-input');
+    if (state.defaults.line === CONFIG.OTHER_VALUE && state.defaults.lineCustom) {
+      $('#qtyProdLineOther').value = state.defaults.lineCustom;
+      $('#qtyProdLineOther').classList.remove('hidden-input');
+    }
+    if (state.defaults.shift === CONFIG.OTHER_VALUE && state.defaults.shiftCustom) {
+      $('#qtyProdShiftOther').value = state.defaults.shiftCustom;
+      $('#qtyProdShiftOther').classList.remove('hidden-input');
+    }
+    fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, state.defaults.machine);
+    $('#skipProdInfo').checked = false;
+    toggleSkipProdInfo();
   }
-  if (state.defaults.shift === CONFIG.OTHER_VALUE && state.defaults.shiftCustom) {
-    $('#qtyProdShiftOther').value = state.defaults.shiftCustom;
-    $('#qtyProdShiftOther').classList.remove('hidden-input');
-  }
-  fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, state.defaults.machine);
-  $('#skipProdInfo').checked = false;
-  toggleSkipProdInfo();
+
   updateQtyTotal();
   $('#qtyModal').classList.remove('hidden');
   setTimeout(()=>$('#qtyCases').focus(), 200);
@@ -780,7 +854,11 @@ function toggleSkipProdInfo() {
   if (skip) wrap.classList.add('skip-mode');
   else wrap.classList.remove('skip-mode');
 }
-function closeQtyModal() { $('#qtyModal').classList.add('hidden'); currentItem = null; }
+function closeQtyModal() {
+  $('#qtyModal').classList.add('hidden');
+  currentItem = null;
+  state.editingIndex = null;
+}
 function updateQtyTotal() {
   if (!currentItem) return;
   const c = parseFloat($('#qtyCases').value) || 0;
@@ -843,6 +921,20 @@ function addToCart() {
     cases: c, packs: p, total
   };
 
+  // ===== NẾU ĐANG SỬA =====
+  if (state.editingIndex !== null) {
+    state.cart[state.editingIndex] = newRow;
+    state.lastRow = { prodDate, prodLine, prodShift, packMachine };
+    saveSession();
+    renderCart();
+    const idx = state.editingIndex;
+    state.editingIndex = null;
+    closeQtyModal();
+    toast('✅ Đã cập nhật dòng #' + (idx + 1), 'success');
+    return;
+  }
+
+  // ===== THÊM MỚI =====
   const key = cartKey(newRow);
   const existing = state.cart.find(x => cartKey(x) === key);
   if (existing) {
@@ -905,10 +997,13 @@ function renderCart() {
           <span class="ml-1 text-slate-500">(1T=${fmt(x.numInSale)})</span>
         </div>
       </div>
-      <div class="text-right">
+      <div class="text-right flex flex-col items-end">
         <div class="font-bold text-blue-700">${fmt(x.total)}</div>
         <div class="text-[10px] text-slate-400">${x.uom||'sp'}</div>
-        <button onclick="removeCart(${i})" class="text-red-500 text-xs mt-1">✕ Xoá</button>
+        <div class="flex flex-col gap-1 mt-1">
+          <button onclick="editCartItem(${i})" class="text-blue-600 text-xs font-semibold">✏️ Sửa</button>
+          <button onclick="removeCart(${i})" class="text-red-500 text-xs">✕ Xoá</button>
+        </div>
       </div>
     </div>`;
   }).join('');
@@ -917,6 +1012,14 @@ function renderCart() {
 function removeCart(i) {
   if (!confirm('Xoá dòng này?')) return;
   state.cart.splice(i,1); saveSession(); renderCart();
+}
+function editCartItem(i) {
+  const row = state.cart[i];
+  if (!row) return;
+  const item = state.itemByCode.get(normKey(row.itemCode));
+  if (!item) { toast('Không tìm thấy SP trong danh mục', 'error'); return; }
+  state.editingIndex = i;
+  openQtyModal(item, row);
 }
 function updateSummary() {
   const totalQty = state.cart.reduce((s,x)=>s+x.total,0);
@@ -1043,6 +1146,40 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#exportBtn').onclick = exportCSV;
   $('#submitBtn').onclick = submitToSheet;
 
+  // === Auto collapse header khi cuộn ===
+  let headerCollapsed = false;
+  const headerExpanded = $('#headerExpanded');
+  const headerToggleBtn = $('#headerToggleBtn');
+
+  function setHeaderCollapsed(collapsed) {
+    if (collapsed === headerCollapsed) return;
+    headerCollapsed = collapsed;
+    if (collapsed) {
+      headerExpanded.style.maxHeight = '0px';
+      headerExpanded.style.opacity = '0';
+      headerToggleBtn.style.transform = 'rotate(-90deg)';
+    } else {
+      headerExpanded.style.maxHeight = '300px';
+      headerExpanded.style.opacity = '1';
+      headerToggleBtn.style.transform = 'rotate(0deg)';
+    }
+  }
+
+  headerExpanded.style.maxHeight = '300px';
+  headerExpanded.style.transition = 'max-height 0.25s ease, opacity 0.2s ease';
+
+  headerToggleBtn.addEventListener('click', () => {
+    setHeaderCollapsed(!headerCollapsed);
+  });
+
+  let lastScrollY = 0;
+  window.addEventListener('scroll', () => {
+    const y = window.scrollY;
+    if (y > 60 && y > lastScrollY) setHeaderCollapsed(true);
+    else if (y < 20) setHeaderCollapsed(false);
+    lastScrollY = y;
+  }, { passive: true });
+
   boot();
 });
 </script>
@@ -1089,23 +1226,40 @@ window.addEventListener('DOMContentLoaded', () => {
 
 <!-- ============ MAIN ============ -->
 <div id="screen-main" class="hidden min-h-screen pb-32">
-  <header class="bg-blue-700 text-white sticky top-0 z-30 shadow-md">
-    <div class="max-w-2xl mx-auto px-4 py-3 flex items-start justify-between gap-2">
-      <div class="min-w-0 flex-1">
-        <div class="text-xs opacity-80">Nhà phân phối</div>
-        <div id="distCode" class="font-mono text-sm opacity-90"></div>
-        <div id="distName" class="font-bold truncate"></div>
-        <div id="distAlias" class="text-xs opacity-75 truncate"></div>
-        <div id="userInfo" class="text-xs opacity-90 truncate mt-0.5"></div>
-        <div id="sessionInfo" class="text-[10px] opacity-70 font-mono truncate"></div>
-        <div class="flex items-center gap-2 mt-1 flex-wrap">
-          <button id="reloadBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải lại</button>
-          <button id="continuousBtn" class="text-[10px] hover:opacity-90 px-2 py-1 rounded font-semibold">🔁 Quét liên tục</button>
-          <span id="cacheInfo" class="text-[10px] opacity-70"></span>
-          <span id="offlineBadge" class="hidden text-[10px] bg-amber-500 text-white px-2 py-1 rounded offline-badge"></span>
+  <header id="mainHeader" class="bg-blue-700 text-white sticky top-0 z-30 shadow-md transition-all duration-200">
+    <div class="max-w-2xl mx-auto px-4">
+
+      <!-- Vùng LUÔN hiển thị -->
+      <div class="flex items-center justify-between gap-2 py-2">
+        <div class="flex items-center gap-2 min-w-0 flex-1">
+          <button id="headerToggleBtn" class="text-lg flex-shrink-0 transition-transform duration-200" aria-label="Mở rộng">▾</button>
+          <div class="min-w-0 flex-1">
+            <div class="text-[10px] opacity-75 leading-none">Nhà phân phối</div>
+            <div class="flex items-baseline gap-2 min-w-0">
+              <span id="distCodeCompact" class="font-mono text-xs opacity-90 flex-shrink-0"></span>
+              <span id="distNameCompact" class="font-bold text-sm truncate"></span>
+            </div>
+          </div>
+        </div>
+        <button id="logoutBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1.5 rounded whitespace-nowrap">Đăng xuất</button>
+      </div>
+
+      <!-- Vùng CHI TIẾT -->
+      <div id="headerExpanded" class="pb-3 border-t border-blue-600/40 overflow-hidden">
+        <div class="pt-2 space-y-1">
+          <div id="distName" class="font-bold text-sm truncate"></div>
+          <div id="distAlias" class="text-xs opacity-75 truncate"></div>
+          <div id="userInfo" class="text-xs opacity-90 truncate"></div>
+          <div id="sessionInfo" class="text-[10px] opacity-70 font-mono truncate"></div>
+          <div class="flex items-center gap-2 mt-1 flex-wrap">
+            <button id="reloadBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải lại</button>
+            <button id="continuousBtn" class="text-[10px] hover:opacity-90 px-2 py-1 rounded font-semibold">🔁 Quét liên tục</button>
+            <span id="cacheInfo" class="text-[10px] opacity-70"></span>
+            <span id="offlineBadge" class="hidden text-[10px] bg-amber-500 text-white px-2 py-1 rounded offline-badge"></span>
+          </div>
         </div>
       </div>
-      <button id="logoutBtn" class="text-xs bg-blue-800 hover:bg-blue-900 px-3 py-2 rounded-lg">Đăng xuất</button>
+
     </div>
   </header>
 
@@ -1214,76 +1368,89 @@ window.addEventListener('DOMContentLoaded', () => {
 
 <!-- ============ QTY MODAL ============ -->
 <div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center overflow-y-auto">
-  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5 my-4">
-    <h3 id="qtyItemName" class="font-bold text-slate-800 text-lg"></h3>
-    <p id="qtyItemMeta" class="text-sm text-slate-500 mt-1"></p>
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 overflow-hidden">
 
-    <button id="copyPrevBtn" class="hidden w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">
-      📋 Dùng lại: ...
-    </button>
-
-    <div class="grid grid-cols-2 gap-3 mt-4">
-      <div>
-        <label class="text-xs font-semibold text-slate-600">Số thùng</label>
-        <input id="qtyCases" type="number" inputmode="numeric" min="0" placeholder="0"
-          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+    <!-- STICKY HEADER -->
+    <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-5 pt-4 pb-3 z-20">
+      <div class="flex items-start gap-3">
+        <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl flex-shrink-0">📦</div>
+        <div class="flex-1 min-w-0">
+          <div id="qtyModalMode" class="hidden text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded inline-block mb-1">✏️ ĐANG SỬA DÒNG</div>
+          <h3 id="qtyItemName" class="font-bold text-blue-900 text-base leading-tight"></h3>
+          <p id="qtyItemMeta" class="text-xs text-slate-500 mt-1"></p>
+        </div>
       </div>
-      <div>
-        <label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
-        <input id="qtyPacks" type="number" inputmode="numeric" min="0" placeholder="0"
-          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-      </div>
+      <button id="copyPrevBtn" class="hidden w-full mt-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">
+        📋 Dùng lại: ...
+      </button>
     </div>
 
-    <div class="mt-4 pt-4 border-t border-slate-200">
-      <div class="flex items-center justify-between mb-2">
-        <div class="text-xs font-bold text-slate-700 uppercase tracking-wide">Thông tin sản xuất</div>
-        <label class="flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg cursor-pointer select-none">
-          <input id="skipProdInfo" type="checkbox" class="w-4 h-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
-          <span>Bỏ qua Line/Ca/Máy</span>
-        </label>
+    <!-- NỘI DUNG -->
+    <div class="px-5 pb-5">
+
+      <div class="grid grid-cols-2 gap-3 mt-4">
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Số thùng</label>
+          <input id="qtyCases" type="number" inputmode="numeric" min="0" placeholder="0"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
+          <input id="qtyPacks" type="number" inputmode="numeric" min="0" placeholder="0"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+        </div>
       </div>
 
-      <div>
-        <label class="text-xs font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
-        <input id="qtyProdDate" type="date"
-          class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-      </div>
+      <div class="mt-4 pt-4 border-t border-slate-200">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-xs font-bold text-slate-700 uppercase tracking-wide">Thông tin sản xuất</div>
+          <label class="flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg cursor-pointer select-none">
+            <input id="skipProdInfo" type="checkbox" class="w-4 h-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
+            <span>Bỏ qua Line/Ca/Máy</span>
+          </label>
+        </div>
 
-      <div id="prodInfoFields" class="transition-opacity">
-        <div class="mt-3">
-          <label class="text-xs font-semibold text-slate-600">Máy đóng gói số</label>
-          <input id="qtyPackMachine" type="text" list="machineList" placeholder="VD: Máy 3"
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
+          <input id="qtyProdDate" type="date"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-          <datalist id="machineList"></datalist>
         </div>
-        <div class="mt-3">
-          <label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
-          <select id="qtyProdLine"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
-          <input id="qtyProdLineOther" type="text" placeholder="Nhập tên Line..."
-            class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
-        </div>
-        <div class="mt-3">
-          <label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
-          <select id="qtyProdShift"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
-          <input id="qtyProdShiftOther" type="text" placeholder="Nhập tên Ca..."
-            class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
+
+        <div id="prodInfoFields" class="transition-opacity">
+          <div class="mt-3">
+            <label class="text-xs font-semibold text-slate-600">Máy đóng gói số</label>
+            <input id="qtyPackMachine" type="text" list="machineList" placeholder="VD: Máy 3"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+            <datalist id="machineList"></datalist>
+          </div>
+          <div class="mt-3">
+            <label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
+            <select id="qtyProdLine"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+            <input id="qtyProdLineOther" type="text" placeholder="Nhập tên Line..."
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
+          </div>
+          <div class="mt-3">
+            <label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
+            <select id="qtyProdShift"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+            <input id="qtyProdShiftOther" type="text" placeholder="Nhập tên Ca..."
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
+          </div>
         </div>
       </div>
-    </div>
 
-    <div class="mt-4 bg-slate-50 rounded-lg p-3">
-      <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
-      <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
-        class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg font-bold text-blue-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-      <p id="qtyBreakdown" class="text-xs text-slate-500 mt-2"></p>
-    </div>
+      <div class="mt-4 bg-slate-50 rounded-lg p-3">
+        <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
+        <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg font-bold text-blue-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+        <p id="qtyBreakdown" class="text-xs text-slate-500 mt-2"></p>
+      </div>
 
-    <div class="grid grid-cols-2 gap-3 mt-5">
-      <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
-      <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Thêm</button>
+      <div class="grid grid-cols-2 gap-3 mt-5">
+        <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
+        <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Thêm</button>
+      </div>
     </div>
   </div>
 </div>
