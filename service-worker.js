@@ -1,8 +1,8 @@
 // ============================================================
-// SERVICE WORKER — PWA Kiểm kê (v6)
+// SERVICE WORKER — PWA Kiểm kê (v8)
 // ============================================================
 
-const CACHE_NAME = 'kiemke-v6';
+const CACHE_NAME = 'kiemke-v8';
 const APP_SHELL = [
   './',
   './index.html',
@@ -14,7 +14,9 @@ const SKIP_CACHE_HOSTS = [
   'docs.google.com',
   'script.google.com',
   'cdn.jsdelivr.net',
-  'cdn.tailwindcss.com'
+  'cdn.tailwindcss.com',
+  'unpkg.com',
+  'bigdatacloud.net'
 ];
 
 self.addEventListener('install', (event) => {
