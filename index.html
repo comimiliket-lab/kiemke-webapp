@@ -16,6 +16,7 @@
 
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
 <style>
   body { -webkit-tap-highlight-color: transparent; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .scan-line { position:absolute; top:10%; left:0; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; pointer-events:none; z-index:15; }
@@ -40,7 +41,7 @@
 <body class="bg-slate-100 min-h-screen font-sans">
 
 <script>
-// ============ PWA: SERVICE WORKER ============
+// ============ PWA ============
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./service-worker.js')
@@ -99,6 +100,7 @@ const state = {
   itemByCode: new Map(),
   currentDistributor: null, currentUser: null, sessionId: null, cart: [],
   editingIndex: null,
+  location: { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null },
   defaults: { line: CONFIG.DEFAULT_LINE, shift: CONFIG.DEFAULT_SHIFT, machine: CONFIG.DEFAULT_MACHINE },
   recentScans: {},
   lastRow: null,
@@ -137,12 +139,126 @@ const genSessionId = () => {
   return `${stamp}-${rnd}`;
 };
 
-// ============ LOOKUP BARCODE ĐA NGUỒN ============
 function findItemByScanCode(code) {
   const k = normKey(code);
   if (state.itemByBarcode.has(k)) return { item: state.itemByBarcode.get(k), type: 'barcode' };
   if (state.itemByPosCsCode.has(k)) return { item: state.itemByPosCsCode.get(k), type: 'poscs' };
   return null;
+}
+
+// ============ ĐỊNH VỊ GPS ============
+function setLocStatus(text, color = 'text-slate-500') {
+  const el = $('#locStatus');
+  if (el) {
+    el.className = 'text-xs mt-1 ' + color;
+    el.textContent = text;
+  }
+}
+
+async function fetchLocation() {
+  if (!('geolocation' in navigator)) {
+    setLocStatus('❌ Thiết bị không hỗ trợ GPS', 'text-red-600');
+    toast('Thiết bị không hỗ trợ định vị', 'error');
+    state.location.enabled = false;
+    $('#locEnable').checked = false;
+    return;
+  }
+
+  setLocStatus('⏳ Đang lấy vị trí...', 'text-blue-600');
+  const $addr = $('#locAddress');
+  const $coords = $('#locCoords');
+  $addr.classList.add('hidden');
+  $coords.classList.add('hidden');
+
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const acc = Math.round(pos.coords.accuracy);
+
+      state.location.lat = lat;
+      state.location.lng = lng;
+      state.location.accuracy = acc;
+      state.location.ts = new Date().toISOString();
+
+      $coords.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} (±${acc}m)`;
+      $coords.classList.remove('hidden');
+      setLocStatus('✅ Đã lấy tọa độ, đang tra địa chỉ...', 'text-blue-600');
+
+      try {
+        const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=vi`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const parts = [
+          data.locality || data.city,
+          data.principalSubdivision,
+          data.countryName
+        ].filter(Boolean);
+        const addr = parts.join(', ') || '(không tra được địa chỉ)';
+
+        state.location.address = addr;
+        $addr.textContent = '📍 ' + addr;
+        $addr.classList.remove('hidden');
+        setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
+        toast('Đã lấy vị trí: ' + addr, 'success');
+
+      } catch (err) {
+        console.error('Reverse geocode error:', err);
+        state.location.address = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+        $addr.textContent = '📍 ' + state.location.address;
+        $addr.classList.remove('hidden');
+        setLocStatus('✅ Đã lấy tọa độ (không tra được địa chỉ)', 'text-amber-600');
+      }
+
+      saveSession();
+    },
+    (err) => {
+      console.error('Geolocation error:', err);
+      let msg = '❌ Không lấy được vị trí';
+      if (err.code === 1) msg = '❌ Bạn chưa cho phép truy cập vị trí';
+      else if (err.code === 2) msg = '❌ Không xác định được vị trí';
+      else if (err.code === 3) msg = '❌ Quá thời gian lấy vị trí';
+      setLocStatus(msg, 'text-red-600');
+      toast(msg, 'error');
+      state.location.enabled = false;
+      $('#locEnable').checked = false;
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+  );
+}
+
+function toggleLocation() {
+  const on = $('#locEnable').checked;
+  state.location.enabled = on;
+  if (on) {
+    fetchLocation();
+  } else {
+    state.location.lat = null;
+    state.location.lng = null;
+    state.location.address = '';
+    state.location.accuracy = null;
+    state.location.ts = null;
+    setLocStatus('Chưa lấy vị trí', 'text-slate-500');
+    $('#locAddress').classList.add('hidden');
+    $('#locCoords').classList.add('hidden');
+    saveSession();
+  }
+}
+
+function renderLocation() {
+  const L = state.location;
+  const chk = $('#locEnable');
+  if (chk) chk.checked = L.enabled;
+  if (L.lat && L.lng) {
+    $('#locCoords').textContent = `${L.lat.toFixed(6)}, ${L.lng.toFixed(6)}${L.accuracy ? ' (±'+L.accuracy+'m)' : ''}`;
+    $('#locCoords').classList.remove('hidden');
+    if (L.address) {
+      $('#locAddress').textContent = '📍 ' + L.address;
+      $('#locAddress').classList.remove('hidden');
+    }
+    setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
+  }
 }
 
 // ============ OFFLINE QUEUE ============
@@ -305,9 +421,11 @@ async function boot() {
           state.currentDistributor = s.currentDistributor;
           state.currentUser = s.currentUser;
           state.sessionId = s.sessionId || genSessionId();
+          state.location = s.location || { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
           state.cart = s.cart || [];
           showScreen('main');
           renderDistHeader();
+          renderLocation();
           renderCart();
         } else showScreen('login');
       } catch(_) { showScreen('login'); }
@@ -354,11 +472,13 @@ function doLogin() {
   state.currentDistributor = found;
   state.currentUser = { name: userName, phone: userPhone };
   state.sessionId = genSessionId();
+  state.location = { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
   state.cart = [];
   state.recentScans = {};
   saveSession();
   showScreen('main');
   renderDistHeader();
+  renderLocation();
   renderCart();
 }
 
@@ -366,6 +486,7 @@ function logout() {
   if (!confirm('Kết thúc phiên?')) return;
   state.currentDistributor = null; state.currentUser = null; state.sessionId = null; state.cart = [];
   state.recentScans = {}; state.lastRow = null; state.editingIndex = null;
+  state.location = { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
   localStorage.removeItem('kks_session');
   showScreen('login');
   $('#loginUser').value = ''; $('#loginPhone').value = ''; $('#loginInput').value = '';
@@ -376,6 +497,7 @@ function saveSession() {
     currentDistributor: state.currentDistributor,
     currentUser: state.currentUser,
     sessionId: state.sessionId,
+    location: state.location,
     cart: state.cart
   }));
 }
@@ -400,20 +522,27 @@ function renderDistHeader() {
   $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
 }
 
-// ============ NATIVE SCANNER ============
+// ============ SCANNER (Native + ZXing fallback) ============
 let scanStream = null;
 let scanRAF = null;
 let barcodeDetector = null;
 let scanVideoEl = null;
 let lastDetected = { code: '', t: 0 };
+let zxingReader = null;
+let scanEngine = null;
+
+const hasNativeDetector = () => 'BarcodeDetector' in window;
 
 async function openScanner() {
   $('#scanModal').classList.remove('hidden');
   $('#scanError').classList.add('hidden');
   $('#flashBtn').classList.add('hidden');
 
-  if (!('BarcodeDetector' in window)) {
-    showScanError('Thiết bị không hỗ trợ quét barcode', 'Dùng nút "Nhập mã SP" bên dưới.');
+  scanEngine = hasNativeDetector() ? 'native' : 'zxing';
+  console.log('[Scanner] Engine:', scanEngine);
+
+  if (scanEngine === 'zxing' && typeof ZXing === 'undefined') {
+    showScanError('Không tải được thư viện quét', 'Kiểm tra kết nối mạng và thử lại.');
     return;
   }
 
@@ -429,61 +558,112 @@ async function openScanner() {
     scanVideoEl.srcObject = scanStream;
     await scanVideoEl.play();
 
-    const wanted = ['ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','codabar','itf','qr_code','data_matrix','pdf417','aztec'];
-    let supported = wanted.slice();
-    try {
-      const avail = await BarcodeDetector.getSupportedFormats();
-      supported = wanted.filter(f => avail.includes(f));
-      console.log('[Scanner] Available:', avail);
-      console.log('[Scanner] Using:', supported);
-    } catch(err) {
-      console.warn('[Scanner] getSupportedFormats failed, dùng fallback', err);
-      supported = ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','qr_code'];
-    }
-
-    if (!supported.length) {
-      showScanError('Không có format barcode được hỗ trợ', 'Dùng nút "Nhập mã SP" bên dưới.');
-      return;
-    }
-
-    barcodeDetector = new BarcodeDetector({ formats: supported });
-
     const track = scanStream.getVideoTracks()[0];
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     if (caps.torch) $('#flashBtn').classList.remove('hidden');
 
-    const scanLoop = async () => {
-      if (!scanVideoEl || !barcodeDetector) return;
-      try {
-        const codes = await barcodeDetector.detect(scanVideoEl);
-        if (codes.length > 0) {
-          const code = codes[0].rawValue;
-          const now = Date.now();
-          if (code !== lastDetected.code || now - lastDetected.t > 2000) {
-            lastDetected = { code, t: now };
-            if (navigator.vibrate) navigator.vibrate(80);
-            onBarcodeDetected(code);
-            return;
-          }
-        }
-      } catch(_) {}
-      scanRAF = requestAnimationFrame(scanLoop);
-    };
-    scanRAF = requestAnimationFrame(scanLoop);
+    if (scanEngine === 'native') {
+      await startNativeScanner();
+    } else {
+      await startZXingScanner();
+    }
 
   } catch (e) {
     console.error('Scanner error:', e);
     let msg = 'Không mở được camera';
     let hint = e.message || e.name || '';
-    if (e.name === 'NotAllowedError') { msg = 'Chưa cấp quyền camera'; hint = 'Bấm 🔒 → Quyền → Camera → Cho phép'; }
+    if (e.name === 'NotAllowedError') {
+      msg = 'Chưa cấp quyền camera';
+      hint = 'Vào Cài đặt iOS → Safari → Camera → Cho phép. Hoặc bấm "aA" trên thanh địa chỉ → Cài đặt trang web → Camera → Cho phép.';
+    }
     else if (e.name === 'NotFoundError') { msg = 'Không có camera'; }
     else if (e.name === 'NotReadableError') { msg = 'Camera đang bị app khác dùng'; hint = 'Đóng Zalo/Camera/Facebook rồi thử lại'; }
     showScanError(msg, hint);
   }
 }
 
+async function startNativeScanner() {
+  const wanted = ['ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','codabar','itf','qr_code','data_matrix','pdf417','aztec'];
+  let supported = wanted.slice();
+  try {
+    const avail = await BarcodeDetector.getSupportedFormats();
+    supported = wanted.filter(f => avail.includes(f));
+    console.log('[Scanner] Native formats:', supported);
+  } catch(err) {
+    supported = ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','qr_code'];
+  }
+  if (!supported.length) {
+    showScanError('Không có format barcode được hỗ trợ', 'Dùng nút "Nhập mã SP" bên dưới.');
+    return;
+  }
+  barcodeDetector = new BarcodeDetector({ formats: supported });
+
+  const scanLoop = async () => {
+    if (!scanVideoEl || !barcodeDetector || scanEngine !== 'native') return;
+    try {
+      const codes = await barcodeDetector.detect(scanVideoEl);
+      if (codes.length > 0) {
+        const code = codes[0].rawValue;
+        const now = Date.now();
+        if (code !== lastDetected.code || now - lastDetected.t > 2000) {
+          lastDetected = { code, t: now };
+          if (navigator.vibrate) navigator.vibrate(80);
+          onBarcodeDetected(code);
+          return;
+        }
+      }
+    } catch(_) {}
+    scanRAF = requestAnimationFrame(scanLoop);
+  };
+  scanRAF = requestAnimationFrame(scanLoop);
+}
+
+async function startZXingScanner() {
+  const hints = new Map();
+  const formats = [
+    ZXing.BarcodeFormat.EAN_13,
+    ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.CODE_93,
+    ZXing.BarcodeFormat.UPC_A,
+    ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.CODABAR,
+    ZXing.BarcodeFormat.ITF,
+    ZXing.BarcodeFormat.QR_CODE,
+    ZXing.BarcodeFormat.DATA_MATRIX
+  ];
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+  const reader = new ZXing.BrowserMultiFormatReader(hints, {
+    delayBetweenScanAttempts: 250,
+    delayBetweenScanSuccess: 1500
+  });
+
+  try {
+    await reader.decodeFromVideoElement(scanVideoEl, (result, err) => {
+      if (result && scanEngine === 'zxing') {
+        const code = result.getText();
+        const now = Date.now();
+        if (code !== lastDetected.code || now - lastDetected.t > 2000) {
+          lastDetected = { code, t: now };
+          if (navigator.vibrate) navigator.vibrate(80);
+          onBarcodeDetected(code);
+        }
+      }
+    });
+    zxingReader = reader;
+  } catch (err) {
+    console.error('[ZXing] error:', err);
+    showScanError('Không quét được barcode', 'Thử lại hoặc dùng "Nhập mã SP".');
+  }
+}
+
 async function closeScanner() {
+  scanEngine = null;
   if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
+  if (zxingReader) { try { zxingReader.reset(); } catch(_) {} zxingReader = null; }
   if (scanStream) {
     scanStream.getTracks().forEach(t => t.stop());
     scanStream = null;
@@ -669,7 +849,6 @@ let currentItem = null;
 
 function openQtyModal(item, prefillRow) {
   const isEdit = !!prefillRow;
-
   if (!isEdit) state.editingIndex = null;
 
   if (!isEdit) {
@@ -921,7 +1100,6 @@ function addToCart() {
     cases: c, packs: p, total
   };
 
-  // ===== NẾU ĐANG SỬA =====
   if (state.editingIndex !== null) {
     state.cart[state.editingIndex] = newRow;
     state.lastRow = { prodDate, prodLine, prodShift, packMachine };
@@ -934,7 +1112,6 @@ function addToCart() {
     return;
   }
 
-  // ===== THÊM MỚI =====
   const key = cartKey(newRow);
   const existing = state.cart.find(x => cartKey(x) === key);
   if (existing) {
@@ -1032,12 +1209,15 @@ function exportCSV() {
   if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
   const d = state.currentDistributor;
   const u = state.currentUser || {};
+  const L = state.location;
   const rows = [
     ['SessionID','DistributorCode','DistributorName','UserName','UserPhone',
+     'LocationLat','LocationLng','LocationAddress',
      'ItemCode','ItemName','CodeBars','NumInSale','SalUnitMsr',
      'ProdDate','ProdLine','ProdShift','PackMachine','Cases','Packs','Total','Timestamp'],
     ...state.cart.map(x => [
       state.sessionId, d.code, d.name, u.name, u.phone,
+      L.lat || '', L.lng || '', L.address || '',
       x.itemCode, x.itemName, x.barcode, x.numInSale, x.uom,
       x.prodDate, x.prodLine, x.prodShift, x.packMachine,
       x.cases, x.packs, x.total, new Date().toISOString()
@@ -1063,6 +1243,7 @@ async function submitToSheet() {
     distributor: state.currentDistributor,
     user: state.currentUser,
     sessionId: state.sessionId,
+    location: state.location,
     items: state.cart,
     timestamp: new Date().toISOString()
   };
@@ -1106,6 +1287,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#reloadBtn').onclick = () => { if (confirm('Tải lại dữ liệu? (Xóa cache)')) clearSheetCache(); };
   $('#continuousBtn').onclick = toggleContinuous;
   $('#installBtn').onclick = installPWA;
+  $('#locEnable').addEventListener('change', toggleLocation);
 
   $('#scanBtn').onclick = openScanner;
   $('#closeScanBtn').onclick = closeScanner;
@@ -1146,7 +1328,6 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#exportBtn').onclick = exportCSV;
   $('#submitBtn').onclick = submitToSheet;
 
-  // === Auto collapse header khi cuộn ===
   let headerCollapsed = false;
   const headerExpanded = $('#headerExpanded');
   const headerToggleBtn = $('#headerToggleBtn');
@@ -1184,13 +1365,13 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 </script>
 
-<!-- ============ LOADING ============ -->
+<!-- LOADING -->
 <div id="screen-loading" class="hidden fixed inset-0 bg-white flex flex-col items-center justify-center z-50">
   <div class="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
   <p class="mt-4 text-slate-600">Đang tải dữ liệu...</p>
 </div>
 
-<!-- ============ LOGIN ============ -->
+<!-- LOGIN -->
 <div id="screen-login" class="hidden min-h-screen flex items-center justify-center p-4">
   <div class="w-full max-w-md bg-white rounded-2xl shadow-xl p-6">
     <div class="text-center mb-5">
@@ -1224,12 +1405,10 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ============ MAIN ============ -->
+<!-- MAIN -->
 <div id="screen-main" class="hidden min-h-screen pb-32">
   <header id="mainHeader" class="bg-blue-700 text-white sticky top-0 z-30 shadow-md transition-all duration-200">
     <div class="max-w-2xl mx-auto px-4">
-
-      <!-- Vùng LUÔN hiển thị -->
       <div class="flex items-center justify-between gap-2 py-2">
         <div class="flex items-center gap-2 min-w-0 flex-1">
           <button id="headerToggleBtn" class="text-lg flex-shrink-0 transition-transform duration-200" aria-label="Mở rộng">▾</button>
@@ -1244,7 +1423,6 @@ window.addEventListener('DOMContentLoaded', () => {
         <button id="logoutBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1.5 rounded whitespace-nowrap">Đăng xuất</button>
       </div>
 
-      <!-- Vùng CHI TIẾT -->
       <div id="headerExpanded" class="pb-3 border-t border-blue-600/40 overflow-hidden">
         <div class="pt-2 space-y-1">
           <div id="distName" class="font-bold text-sm truncate"></div>
@@ -1259,7 +1437,6 @@ window.addEventListener('DOMContentLoaded', () => {
           </div>
         </div>
       </div>
-
     </div>
   </header>
 
@@ -1274,6 +1451,25 @@ window.addEventListener('DOMContentLoaded', () => {
       <button id="itemCodeBtn" class="col-span-2 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 rounded-xl shadow flex items-center justify-center gap-2">
         <span class="text-xl">⌨️</span><span class="text-sm">Nhập mã SP (không quét được)</span>
       </button>
+    </div>
+
+    <!-- ĐỊNH VỊ KHO -->
+    <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200">
+      <div class="flex items-start justify-between gap-2">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-base">📍</span>
+            <div class="font-semibold text-sm text-slate-800">Vị trí kho kiểm kê</div>
+          </div>
+          <div id="locStatus" class="text-xs text-slate-500 mt-1">Chưa lấy vị trí</div>
+          <div id="locAddress" class="text-xs text-blue-700 mt-1 hidden font-medium"></div>
+          <div id="locCoords" class="text-[10px] text-slate-400 font-mono mt-0.5 hidden"></div>
+        </div>
+        <label class="flex items-center gap-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 px-2 py-1.5 rounded-lg cursor-pointer select-none flex-shrink-0">
+          <input id="locEnable" type="checkbox" class="w-4 h-4 rounded border-blue-300 text-blue-600 focus:ring-blue-500" />
+          <span>Lấy vị trí</span>
+        </label>
+      </div>
     </div>
 
     <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 grid grid-cols-2 gap-3 text-center">
@@ -1295,7 +1491,7 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ============ SCANNER MODAL ============ -->
+<!-- SCANNER MODAL -->
 <div id="scanModal" class="hidden fixed inset-0 bg-black z-50 flex flex-col">
   <div class="flex items-center justify-between p-4 text-white">
     <h3 class="font-semibold">Quét barcode</h3>
@@ -1324,7 +1520,7 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ============ SEARCH MODAL ============ -->
+<!-- SEARCH MODAL -->
 <div id="searchModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl max-h-[85vh] flex flex-col">
     <div class="p-4 border-b border-slate-200 flex items-center gap-2">
@@ -1336,7 +1532,7 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ============ ITEM CODE MODAL ============ -->
+<!-- ITEM CODE MODAL -->
 <div id="itemCodeModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5">
     <div class="flex items-start justify-between gap-2 mb-4">
@@ -1366,11 +1562,10 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ============ QTY MODAL ============ -->
+<!-- QTY MODAL -->
 <div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center overflow-y-auto">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 overflow-hidden">
 
-    <!-- STICKY HEADER -->
     <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-5 pt-4 pb-3 z-20">
       <div class="flex items-start gap-3">
         <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl flex-shrink-0">📦</div>
@@ -1385,9 +1580,7 @@ window.addEventListener('DOMContentLoaded', () => {
       </button>
     </div>
 
-    <!-- NỘI DUNG -->
     <div class="px-5 pb-5">
-
       <div class="grid grid-cols-2 gap-3 mt-4">
         <div>
           <label class="text-xs font-semibold text-slate-600">Số thùng</label>
