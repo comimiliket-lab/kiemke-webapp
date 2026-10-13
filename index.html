@@ -32,6 +32,9 @@
   .offline-badge { animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
   .logo-img { height: 60px; object-fit: contain; }
+  .badge-type { display:inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+  .badge-barcode { background:#dbeafe; color:#1e40af; }
+  .badge-poscs { background:#fce7f3; color:#be185d; }
 </style>
 </head>
 <body class="bg-slate-100 min-h-screen font-sans">
@@ -72,7 +75,9 @@ const CONFIG = {
   COLS: {
     DIST_CODE: 'DistributorCode', DIST_NAME: 'DistributorName', DIST_ALIAS: 'CustomerReference',
     ITEM_CODE: 'ItemCode', ITEM_NAME: 'ItemName', ITEM_FRGN: 'FrgnName',
-    ITEM_BARCODE: 'CodeBars', ITEM_NUMINSALE: 'NumInSale', ITEM_UOM: 'SalUnitMsr', ITEM_GROUP: 'ItmsGrpCod'
+    ITEM_BARCODE: 'CodeBars',
+    ITEM_POSCSCODE: 'U_POSCSCode',           // ← MỚI: barcode 14 số (thùng carton)
+    ITEM_NUMINSALE: 'NumInSale', ITEM_UOM: 'SalUnitMsr', ITEM_GROUP: 'ItmsGrpCod'
   },
   PROD_LINES:  ['Line 6', 'Line 7', 'Line 8', 'Line CL', 'Orther'],
   PROD_SHIFTS: ['Ca A6', 'Ca B6', 'Ca A7', 'Ca B7', 'Ca A8', 'Ca B8', 'Orther'],
@@ -88,7 +93,10 @@ const gvizURL = (sheet) =>
 
 const state = {
   distributors: [], distributorIndex: new Map(),
-  items: [], itemByBarcode: new Map(), itemByCode: new Map(),
+  items: [],
+  itemByBarcode: new Map(),      // barcode 13 số (CodeBars)
+  itemByPosCsCode: new Map(),    // barcode 14 số (U_POSCSCode)
+  itemByCode: new Map(),
   currentDistributor: null, currentUser: null, sessionId: null, cart: [],
   defaults: { line: CONFIG.DEFAULT_LINE, shift: CONFIG.DEFAULT_SHIFT, machine: CONFIG.DEFAULT_MACHINE },
   recentScans: {},
@@ -119,6 +127,20 @@ const genSessionId = () => {
   const rnd = Math.random().toString(36).slice(2,6).toUpperCase();
   return `${stamp}-${rnd}`;
 };
+
+// ============ LOOKUP BARCODE ĐA NGUỒN ============
+// Trả về { item, type } hoặc null
+// type: 'barcode' (CodeBars 13 số) | 'poscs' (U_POSCSCode 14 số)
+function findItemByScanCode(code) {
+  const k = normKey(code);
+  if (state.itemByBarcode.has(k)) {
+    return { item: state.itemByBarcode.get(k), type: 'barcode' };
+  }
+  if (state.itemByPosCsCode.has(k)) {
+    return { item: state.itemByPosCsCode.get(k), type: 'poscs' };
+  }
+  return null;
+}
 
 // ============ OFFLINE QUEUE ============
 function getOfflineQueue() {
@@ -209,6 +231,7 @@ async function boot() {
       loadSheet(CONFIG.SHEETS.SO90), loadSheet(CONFIG.SHEETS.ITEMS)
     ]);
 
+    // ===== Distributors =====
     const dMap = new Map();
     so90.forEach(r => {
       const code = (r[CONFIG.COLS.DIST_CODE]||'').trim();
@@ -231,15 +254,18 @@ async function boot() {
       });
     });
 
+    // ===== Items =====
     state.items = items.map(r => {
-      const code    = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
-      const barcode = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
-      const nis     = parseFloat(r[CONFIG.COLS.ITEM_NUMINSALE]) || 1;
+      const code      = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
+      const barcode   = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
+      const posCsCode = (r[CONFIG.COLS.ITEM_POSCSCODE]||'').trim();
+      const nis       = parseFloat(r[CONFIG.COLS.ITEM_NUMINSALE]) || 1;
       return {
         code,
         name:  (r[CONFIG.COLS.ITEM_NAME]||'').trim(),
         frgn:  (r[CONFIG.COLS.ITEM_FRGN]||'').trim(),
-        barcode,
+        barcode,        // 13 số - từng gói
+        posCsCode,      // 14 số - thùng carton
         numInSale: nis > 0 ? nis : 1,
         uom:   (r[CONFIG.COLS.ITEM_UOM]||'').trim(),
         group: (r[CONFIG.COLS.ITEM_GROUP]||'').trim()
@@ -247,11 +273,25 @@ async function boot() {
     }).filter(i => i.code);
 
     state.itemByBarcode.clear();
+    state.itemByPosCsCode.clear();
     state.itemByCode.clear();
+    let dupBarcode = 0, dupPosCs = 0;
     state.items.forEach(it => {
       state.itemByCode.set(normKey(it.code), it);
-      if (it.barcode) state.itemByBarcode.set(normKey(it.barcode), it);
+      if (it.barcode) {
+        const k = normKey(it.barcode);
+        if (state.itemByBarcode.has(k)) dupBarcode++;
+        else state.itemByBarcode.set(k, it);
+      }
+      if (it.posCsCode) {
+        const k = normKey(it.posCsCode);
+        if (state.itemByPosCsCode.has(k)) dupPosCs++;
+        else state.itemByPosCsCode.set(k, it);
+      }
     });
+
+    if (dupBarcode > 0) console.warn('[Data] Trùng CodeBars:', dupBarcode);
+    if (dupPosCs > 0) console.warn('[Data] Trùng U_POSCSCode:', dupPosCs);
 
     const dSaved = localStorage.getItem('kks_prod_defaults');
     if (dSaved) { try { Object.assign(state.defaults, JSON.parse(dSaved)); } catch(_) {} }
@@ -273,7 +313,7 @@ async function boot() {
     } else showScreen('login');
     showCacheAge();
     updateOfflineBadge();
-    toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU`, 'success');
+    toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU (${state.itemByBarcode.size} BC / ${state.itemByPosCsCode.size} CS)`, 'success');
   } catch (e) {
     console.error(e);
     toast('Lỗi tải dữ liệu. Kiểm tra Publish Sheet.', 'error');
@@ -384,8 +424,9 @@ async function openScanner() {
     scanVideoEl.srcObject = scanStream;
     await scanVideoEl.play();
 
+    // Bổ sung itf_14, itf cho barcode 14 số (thùng carton)
     barcodeDetector = new BarcodeDetector({
-      formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','qr_code','data_matrix']
+      formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','itf_14','qr_code','data_matrix']
     });
 
     const track = scanStream.getVideoTracks()[0];
@@ -458,18 +499,21 @@ function showScanError(msg, hint) {
   $('#flashBtn').classList.add('hidden');
 }
 
+// ====== XỬ LÝ KHI QUÉT RA BARCODE ======
 function onBarcodeDetected(code) {
-  const item = state.itemByBarcode.get(normKey(code));
-  if (!item) {
+  const found = findItemByScanCode(code);
+  if (!found) {
+    // Không tìm thấy trong cả 2 nguồn → mở modal nhập tay + tìm theo tên
+    const codeType = code.length === 14 ? 'ITF-14 (thùng)' : (code.length === 13 ? 'EAN-13' : '');
     closeScanner().then(() => {
-      openItemCodeModal();
-      $('#itemCodeInput').value = code;
-      onItemCodeInput();
-      toast('Không có SKU cho barcode: ' + code, 'error');
+      openItemCodeModal(code, codeType);
+      toast('Không tìm thấy: ' + code, 'error');
     });
     return;
   }
-  closeScanner().then(() => openQtyModal(item));
+  // Lưu lại loại barcode để phân biệt khi cần
+  found.item._matchedType = found.type;
+  closeScanner().then(() => openQtyModal(found.item));
 }
 
 // ============ SEARCH ============
@@ -499,6 +543,9 @@ function renderSearchResults(q) {
 }
 function rowHTML(it) {
   const code = it.code.replace(/"/g,'&quot;');
+  const bcLine = [];
+  if (it.barcode) bcLine.push('BC: ' + it.barcode);
+  if (it.posCsCode) bcLine.push('CS: ' + it.posCsCode);
   return `
     <button class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100"
       onclick='pickSearchResult("${code}")'>
@@ -506,7 +553,7 @@ function rowHTML(it) {
       ${it.frgn && it.frgn!==it.name ? `<div class="text-xs text-slate-400 italic">${it.frgn}</div>` : ''}
       <div class="text-xs text-slate-500 mt-0.5">
         <span class="font-mono">${it.code}</span>
-        ${it.barcode ? ' • BC: '+it.barcode : ' • <span class="text-amber-600">không BC</span>'}
+        ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">không BC/CS</span>'}
         • 1 thùng = ${fmt(it.numInSale)} ${it.uom||'sp'}
       </div>
     </button>`;
@@ -518,18 +565,37 @@ function pickSearchResult(code) {
   openQtyModal(item);
 }
 
-// ============ ITEM CODE MANUAL INPUT ============
-function openItemCodeModal() {
+// ============ ITEM CODE MANUAL INPUT (nâng cấp) ============
+function openItemCodeModal(prefillCode, codeType) {
   $('#itemCodeModal').classList.remove('hidden');
-  $('#itemCodeInput').value = '';
-  $('#itemCodePreview').classList.add('hidden');
+  $('#itemCodeInput').value = prefillCode || '';
   $('#itemCodePreview').innerHTML = '';
+  $('#itemCodePreview').classList.add('hidden');
+  $('#itemCodeWarn').classList.add('hidden');
+
+  // Nếu có prefillCode → hiện cảnh báo không tìm thấy
+  if (prefillCode) {
+    $('#itemCodeWarn').innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
+        <div class="text-sm text-red-700 font-semibold">❌ Không tìm thấy mã này trong hệ thống</div>
+        <div class="text-xs text-red-600 mt-1">
+          Mã đã quét: <span class="font-mono font-bold">${prefillCode}</span>
+          ${codeType ? ' (' + codeType + ')' : ''}
+        </div>
+        <div class="text-xs text-red-600 mt-2">
+          → Sửa lại mã, hoặc chuyển sang <b>tìm theo tên sản phẩm</b>.
+        </div>
+      </div>`;
+    $('#itemCodeWarn').classList.remove('hidden');
+    onItemCodeInput();
+  }
   setTimeout(() => $('#itemCodeInput').focus(), 120);
 }
 function closeItemCodeModal() {
   $('#itemCodeModal').classList.add('hidden');
   $('#itemCodeInput').value = '';
   $('#itemCodePreview').classList.add('hidden');
+  $('#itemCodeWarn').classList.add('hidden');
 }
 function onItemCodeInput() {
   const code = $('#itemCodeInput').value.trim();
@@ -537,13 +603,16 @@ function onItemCodeInput() {
   if (!code) { preview.classList.add('hidden'); preview.innerHTML = ''; return; }
   const item = state.itemByCode.get(normKey(code));
   if (item) {
+    const bcLine = [];
+    if (item.barcode) bcLine.push('BC: ' + item.barcode);
+    if (item.posCsCode) bcLine.push('CS: ' + item.posCsCode);
     preview.innerHTML = `
       <div class="bg-green-50 border border-green-200 rounded-lg p-3">
         <div class="font-semibold text-green-800 text-sm">✅ ${item.name || '(không tên)'}</div>
         ${item.frgn && item.frgn !== item.name ? `<div class="text-xs text-green-700 italic mt-0.5">${item.frgn}</div>` : ''}
         <div class="text-xs text-green-700 mt-1">
           <span class="font-mono">${item.code}</span>
-          ${item.barcode ? ' • BC: ' + item.barcode : ' • <span class="text-amber-600">Không BC</span>'}
+          ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">Không BC/CS</span>'}
           • 1 thùng = ${fmt(item.numInSale)} ${item.uom || 'sp'}
         </div>
       </div>`;
@@ -551,7 +620,7 @@ function onItemCodeInput() {
     preview.innerHTML = `
       <div class="bg-red-50 border border-red-200 rounded-lg p-3">
         <div class="text-sm text-red-700">❌ Không tìm thấy mã: <span class="font-mono font-bold">${code}</span></div>
-        <div class="text-xs text-red-600 mt-1">Kiểm tra lại hoặc dùng "Tìm theo tên"</div>
+        <div class="text-xs text-red-600 mt-1">Kiểm tra lại hoặc dùng "Tìm theo tên SP" bên dưới</div>
       </div>`;
   }
   preview.classList.remove('hidden');
@@ -566,10 +635,15 @@ function submitItemCode() {
 }
 function scanToManual() {
   const lastCode = lastDetected.code;
+  const codeType = lastCode ? (lastCode.length === 14 ? 'ITF-14 (thùng)' : (lastCode.length === 13 ? 'EAN-13' : '')) : '';
   closeScanner().then(() => {
-    openItemCodeModal();
-    if (lastCode) { $('#itemCodeInput').value = lastCode; onItemCodeInput(); }
+    openItemCodeModal(lastCode, codeType);
   });
+}
+// Từ modal nhập mã → chuyển sang tìm theo tên
+function gotoSearchFromItemCode() {
+  closeItemCodeModal();
+  openSearch();
 }
 
 // ============ QTY MODAL ============
@@ -589,11 +663,25 @@ function openQtyModal(item) {
   state.recentScans[item.code] = now;
 
   currentItem = item;
+
+  // Hiển thị badge loại mã đã quét
+  let scanTypeBadge = '';
+  if (item._matchedType === 'poscs') {
+    scanTypeBadge = '<span class="badge-type badge-poscs">📦 CS 14 số</span>';
+  } else if (item._matchedType === 'barcode') {
+    scanTypeBadge = '<span class="badge-type badge-barcode">📷 BC 13 số</span>';
+  }
+  item._matchedType = null;
+
   $('#qtyItemName').textContent = item.name || '(không tên)';
+  const bcLine = [];
+  if (item.barcode) bcLine.push('BC: <span class="font-mono">'+item.barcode+'</span>');
+  if (item.posCsCode) bcLine.push('CS: <span class="font-mono">'+item.posCsCode+'</span>');
   $('#qtyItemMeta').innerHTML = `
     <span class="font-mono">${item.code}</span>
-    ${item.barcode ? ' • BC: <span class="font-mono">'+item.barcode+'</span>' : ' • <span class="text-amber-600">Không barcode</span>'}
+    ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">Không BC/CS</span>'}
     • 1 thùng = <b>${fmt(item.numInSale)}</b> ${item.uom || 'sp'}
+    ${scanTypeBadge}
   `;
   $('#qtyCases').value = '';
   $('#qtyPacks').value = '';
@@ -748,7 +836,8 @@ function addToCart() {
 
   const newRow = {
     itemCode: currentItem.code, itemName: currentItem.name,
-    barcode: currentItem.barcode, numInSale: currentItem.numInSale, uom: currentItem.uom,
+    barcode: currentItem.barcode || currentItem.posCsCode || '',
+    numInSale: currentItem.numInSale, uom: currentItem.uom,
     prodDate, prodLine, prodShift, packMachine,
     cases: c, packs: p, total
   };
@@ -923,7 +1012,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#closeSearchBtn').onclick = closeSearch;
   $('#searchInput').addEventListener('input', e => renderSearchResults(e.target.value));
 
-  $('#itemCodeBtn').onclick = openItemCodeModal;
+  $('#itemCodeBtn').onclick = () => openItemCodeModal();
   $('#closeItemCodeBtn').onclick = closeItemCodeModal;
   $('#itemCodeCancelBtn').onclick = closeItemCodeModal;
   $('#itemCodeNextBtn').onclick = submitItemCode;
@@ -932,6 +1021,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') { e.preventDefault(); submitItemCode(); }
   });
   $('#scanToManualBtn').onclick = scanToManual;
+  $('#gotoSearchBtn').onclick = gotoSearchFromItemCode;
 
   $('#qtyCases').addEventListener('input', updateQtyTotal);
   $('#qtyPacks').addEventListener('input', updateQtyTotal);
@@ -1097,14 +1187,24 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="flex items-start justify-between gap-2 mb-4">
       <div>
         <h3 class="font-bold text-slate-800 text-lg">Nhập mã sản phẩm</h3>
-        <p class="text-xs text-slate-500 mt-0.5">Dành cho SP không quét được barcode</p>
+        <p class="text-xs text-slate-500 mt-0.5">Nhập mã ItemCode, hoặc tìm theo tên SP</p>
       </div>
       <button id="closeItemCodeBtn" class="text-2xl text-slate-500 px-2">✕</button>
     </div>
+
+    <div id="itemCodeWarn" class="hidden"></div>
+
     <label class="text-xs font-semibold text-slate-600">Mã sản phẩm (ItemCode)</label>
     <input id="itemCodeInput" type="text" autocomplete="off" placeholder="VD: 81002529"
       class="w-full border border-slate-300 rounded-lg px-3 py-3 text-lg font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     <div id="itemCodePreview" class="mt-3 hidden"></div>
+
+    <!-- Nút chuyển sang tìm theo tên -->
+    <button id="gotoSearchBtn"
+      class="w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-semibold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2">
+      🔍 Không biết mã? Tìm theo tên sản phẩm
+    </button>
+
     <div class="grid grid-cols-2 gap-3 mt-5">
       <button id="itemCodeCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
       <button id="itemCodeNextBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Tiếp tục</button>
