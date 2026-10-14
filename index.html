@@ -35,10 +35,17 @@
   .badge-type { display:inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
   .badge-barcode { background:#dbeafe; color:#1e40af; }
   .badge-poscs { background:#fce7f3; color:#be185d; }
-  .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+  .status-dot { display:inline-block; width:6px; height:6px; border-radius:50%; }
   .dot-dirty { background:#f59e0b; animation: pulse 1.5s infinite; }
   .dot-saved { background:#10b981; }
   .dot-final { background:#3b82f6; }
+  .header-expand { transition: max-height 0.25s ease, opacity 0.2s ease; max-height: 0; opacity: 0; overflow: hidden; }
+  .header-expand.open { max-height: 220px; opacity: 1; }
+  .action-btn { min-height: 72px; }
+  @media (max-width: 380px) {
+    .action-btn { min-height: 66px; }
+    .action-btn .txt { font-size: 12px; }
+  }
 </style>
 </head>
 <body class="bg-slate-100 min-h-screen font-sans">
@@ -172,6 +179,25 @@ function findItemByScanCode(code) {
 }
 function markDirty() { state.isDirty = true; renderSessionStatus(); }
 
+// ============ HEADER TOGGLE ============
+function setHeaderOpen(open) {
+  const el = document.getElementById('headerExpanded');
+  const btn = document.getElementById('headerToggleBtn');
+  if (!el) return;
+  if (open) {
+    el.classList.add('open');
+    if (btn) btn.style.transform = 'rotate(0deg)';
+  } else {
+    el.classList.remove('open');
+    if (btn) btn.style.transform = 'rotate(-90deg)';
+  }
+}
+function toggleHeader() {
+  const el = document.getElementById('headerExpanded');
+  if (!el) return;
+  setHeaderOpen(!el.classList.contains('open'));
+}
+
 // ============ GPS ============
 function setLocStatus(text, color='text-slate-500') {
   const el = $('#locStatus'); if (el) { el.className = 'text-xs mt-1 ' + color; el.textContent = text; }
@@ -248,7 +274,7 @@ function getOfflineQueue() { try { return JSON.parse(localStorage.getItem('kks_o
 function setOfflineQueue(q) { localStorage.setItem('kks_offline_queue', JSON.stringify(q)); updateOfflineBadge(); }
 function updateOfflineBadge() {
   const q = getOfflineQueue(); const badge = document.getElementById('offlineBadge'); if (!badge) return;
-  if (q.length > 0) { badge.classList.remove('hidden'); badge.textContent = `📤 ${q.length} chờ gửi`; }
+  if (q.length > 0) { badge.classList.remove('hidden'); badge.textContent = `${q.length} chờ`; }
   else badge.classList.add('hidden');
 }
 async function flushOfflineQueue() {
@@ -290,7 +316,7 @@ function clearSheetCache() {
 function showCacheAge() {
   const cached = localStorage.getItem(`kks_cache_${CONFIG.SHEETS.ITEMS}`);
   if (cached) { try { const { ts } = JSON.parse(cached); const ageMin = Math.floor((Date.now() - ts)/60000);
-    const el = document.getElementById('cacheInfo'); if (el) el.textContent = ageMin < 1 ? '(vừa tải)' : `(cache ${ageMin}p)`; } catch(_) {} }
+    const el = document.getElementById('cacheInfo'); if (el) el.textContent = ageMin < 1 ? '(vừa tải)' : `${ageMin}p`; } catch(_) {} }
 }
 
 async function boot() {
@@ -357,6 +383,7 @@ async function boot() {
           state.finalSubmitted = s.finalSubmitted || false;
           showScreen('main');
           renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
+          setHeaderOpen(false); // Mặc định thu gọn
         } else showScreen('login');
       } catch(_) { showScreen('login'); }
     } else showScreen('login');
@@ -405,12 +432,13 @@ function doLogin() {
   state.isDirty = false; state.savedStatus = 'none'; state.lastSavedAt = null; state.finalSubmitted = false;
   saveSession();
   showScreen('main'); renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
+  setHeaderOpen(false);
   setTimeout(() => checkDraftsOnLogin(), 500);
 }
 
 function logout() {
   if (state.isDirty && !state.finalSubmitted) {
-    if (!confirm('Bạn có thay đổi chưa lưu.\n\nĐăng xuất sẽ mất thay đổi này.\nBạn có muốn ĐĂNG XUẤT? (Bấm Cancel để quay lại Lưu nháp)')) return;
+    if (!confirm('Bạn có thay đổi chưa lưu.\n\nĐăng xuất sẽ mất thay đổi này.\nBạn có muốn ĐĂNG XUẤT?')) return;
   } else {
     if (!confirm('Kết thúc phiên?')) return;
   }
@@ -441,10 +469,10 @@ function renderDistHeader() {
   $('#distNameCompact').textContent = name;
   $('#distName').textContent = name;
   $('#distAlias').textContent = aliases ? `(${aliases})` : '';
-  $('#userInfo').textContent = u.name ? `👤 ${u.name} • 📞 ${u.phone}` : '';
-  $('#sessionInfo').textContent = state.sessionId ? `🔑 ${state.sessionId}` : '';
+  $('#userInfo').textContent = u.name ? `${u.name} • ${u.phone}` : '';
+  $('#sessionInfo').textContent = state.sessionId || '';
   $('#continuousBtn').classList.toggle('bg-green-500', state.continuousMode);
-  $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
+  $('#continuousBtn').classList.toggle('bg-blue-800/60', !state.continuousMode);
   renderSessionStatus();
 }
 
@@ -452,18 +480,18 @@ function renderSessionStatus() {
   const el = $('#sessionStatus');
   if (!el) return;
   if (state.finalSubmitted) {
-    el.innerHTML = `<span class="status-dot dot-final"></span><span class="font-semibold">✅ Đã gửi chính thức</span>`;
+    el.innerHTML = `<span class="status-dot dot-final mr-1.5"></span><span class="font-semibold">Đã gửi chính thức</span>`;
     return;
   }
   if (state.isDirty) {
-    el.innerHTML = `<span class="status-dot dot-dirty"></span><span>📝 Chưa lưu thay đổi</span>`;
+    el.innerHTML = `<span class="status-dot dot-dirty mr-1.5"></span><span>Chưa lưu thay đổi</span>`;
     return;
   }
   if (state.savedStatus === 'draft' && state.lastSavedAt) {
-    el.innerHTML = `<span class="status-dot dot-saved"></span><span>💾 Đã lưu nháp ${timeShort(state.lastSavedAt)}</span>`;
+    el.innerHTML = `<span class="status-dot dot-saved mr-1.5"></span><span>Đã lưu nháp ${timeShort(state.lastSavedAt)}</span>`;
     return;
   }
-  el.innerHTML = `<span class="status-dot" style="background:#94a3b8"></span><span>Chưa có dữ liệu</span>`;
+  el.innerHTML = `<span class="status-dot mr-1.5" style="background:#94a3b8"></span><span>Chưa có dữ liệu</span>`;
 }
 
 // ============ CHECK DRAFTS ============
@@ -585,9 +613,7 @@ async function startNativeScanner() {
   scanRAF = requestAnimationFrame(scanLoop);
 }
 
-// ===== ZXing fallback cho iOS: dùng Canvas + HybridBinarizer =====
 async function startZXingScanner() {
-  // Chờ video ready
   await new Promise((resolve) => {
     const check = () => {
       if (scanVideoEl && scanVideoEl.readyState >= 2 && scanVideoEl.videoWidth > 0) resolve();
@@ -595,7 +621,6 @@ async function startZXingScanner() {
     };
     check();
   });
-
   console.log('[ZXing] Video ready:', scanVideoEl.videoWidth, 'x', scanVideoEl.videoHeight);
 
   const hints = new Map();
@@ -609,8 +634,6 @@ async function startZXingScanner() {
   hints.set(ZXing.DecodeHintType.PURE_BARCODE, false);
 
   const reader = new ZXing.BrowserMultiFormatReader(hints);
-
-  // Canvas ẩn để vẽ frame
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
@@ -619,60 +642,37 @@ async function startZXingScanner() {
 
   const scanLoop = () => {
     if (!scanVideoEl || scanEngine !== 'zxing') return;
-
     const now = Date.now();
     if (now - lastScan < MIN_SCAN_INTERVAL) {
-      scanRAF = requestAnimationFrame(scanLoop);
-      return;
+      scanRAF = requestAnimationFrame(scanLoop); return;
     }
     lastScan = now;
-
     try {
-      const vw = scanVideoEl.videoWidth;
-      const vh = scanVideoEl.videoHeight;
-      if (!vw || !vh) {
-        scanRAF = requestAnimationFrame(scanLoop);
-        return;
-      }
-
-      // Scale xuống max 1280px để tăng tốc
+      const vw = scanVideoEl.videoWidth, vh = scanVideoEl.videoHeight;
+      if (!vw || !vh) { scanRAF = requestAnimationFrame(scanLoop); return; }
       const maxSide = 1280;
       let dw = vw, dh = vh;
-      if (Math.max(vw, vh) > maxSide) {
-        const scale = maxSide / Math.max(vw, vh);
-        dw = Math.round(vw * scale);
-        dh = Math.round(vh * scale);
-      }
-      canvas.width = dw;
-      canvas.height = dh;
+      if (Math.max(vw, vh) > maxSide) { const s = maxSide / Math.max(vw, vh); dw = Math.round(vw * s); dh = Math.round(vh * s); }
+      canvas.width = dw; canvas.height = dh;
       ctx.drawImage(scanVideoEl, 0, 0, dw, dh);
-
-      // ZXing decode từ canvas
       const luminance = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
       const binarizer = new ZXing.HybridBinarizer(luminance);
       const bitmap = new ZXing.BinaryBitmap(binarizer);
       const result = reader.decodeBitmap(bitmap);
-
       if (result && result.getText()) {
-        const code = result.getText();
-        const codeNow = Date.now();
+        const code = result.getText(), codeNow = Date.now();
         console.log('[ZXing] Detected:', code);
         if (code !== lastDetected.code || codeNow - lastDetected.t > 2000) {
           lastDetected = { code, t: codeNow };
           if (navigator.vibrate) navigator.vibrate(80);
-          onBarcodeDetected(code);
-          return;
+          onBarcodeDetected(code); return;
         }
       }
     } catch (e) {
-      if (e.name && e.name !== 'NotFoundException') {
-        console.warn('[ZXing] error:', e.name, e.message);
-      }
+      if (e.name && e.name !== 'NotFoundException') console.warn('[ZXing] error:', e.name, e.message);
     }
-
     scanRAF = requestAnimationFrame(scanLoop);
   };
-
   zxingReader = reader;
   scanRAF = requestAnimationFrame(scanLoop);
 }
@@ -1024,39 +1024,39 @@ function renderCart() {
   const box = $('#cartList');
   $('#cartCount').textContent = state.cart.length;
   if (!state.cart.length) {
-    box.innerHTML = '<p class="text-center text-slate-400 py-12">Chưa có sản phẩm. Quét barcode hoặc tìm theo tên.</p>';
+    box.innerHTML = '<p class="text-center text-slate-400 py-10 text-sm">Chưa có sản phẩm. Quét barcode hoặc tìm theo tên.</p>';
     updateSummary(); return;
   }
   box.innerHTML = state.cart.map((x, i) => {
     const hasLineInfo = x.prodLine || x.prodShift || x.packMachine;
     const prodBadges = hasLineInfo
-      ? `<div class="text-xs mt-1 flex flex-wrap gap-1">
+      ? `<div class="text-[10px] mt-1 flex flex-wrap gap-1">
           <span class="bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">📅 ${x.prodDate||'—'}</span>
           <span class="bg-cyan-100 text-cyan-800 px-1.5 py-0.5 rounded">${x.prodLine||'—'}</span>
           <span class="bg-pink-100 text-pink-800 px-1.5 py-0.5 rounded">${x.prodShift||'—'}</span>
           <span class="bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded">🔧 ${x.packMachine||'—'}</span>
         </div>`
-      : `<div class="text-xs mt-1 flex flex-wrap gap-1">
+      : `<div class="text-[10px] mt-1 flex flex-wrap gap-1">
           <span class="bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">📅 ${x.prodDate||'—'}</span>
           <span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded italic">Bỏ qua Line/Ca/Máy</span>
         </div>`;
-    return `<div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200 flex items-start gap-3">
+    return `<div class="bg-white rounded-lg p-2.5 shadow-sm border border-slate-200 flex items-start gap-2">
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-slate-800 text-sm truncate">${x.itemName||'(không tên)'}</div>
-        <div class="text-xs text-slate-500 mt-0.5"><span class="font-mono">${x.itemCode}</span>${x.barcode ? ' • BC: '+x.barcode : ''}</div>
+        <div class="font-semibold text-slate-800 text-[13px] leading-tight truncate">${x.itemName||'(không tên)'}</div>
+        <div class="text-[10px] text-slate-500 mt-0.5 truncate"><span class="font-mono">${x.itemCode}</span>${x.barcode ? ' • '+x.barcode : ''}</div>
         ${prodBadges}
-        <div class="text-xs text-slate-600 mt-1">
-          <span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">${fmt(x.cases)} thùng</span>
-          <span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded ml-1">${fmt(x.packs)} lẻ</span>
+        <div class="text-[10px] text-slate-600 mt-1">
+          <span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">${fmt(x.cases)}T</span>
+          <span class="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded ml-1">${fmt(x.packs)}L</span>
           <span class="ml-1 text-slate-500">(1T=${fmt(x.numInSale)})</span>
         </div>
       </div>
-      <div class="text-right flex flex-col items-end">
-        <div class="font-bold text-blue-700">${fmt(x.total)}</div>
-        <div class="text-[10px] text-slate-400">${x.uom||'sp'}</div>
-        <div class="flex flex-col gap-1 mt-1">
-          <button onclick="editCartItem(${i})" class="text-blue-600 text-xs font-semibold">✏️ Sửa</button>
-          <button onclick="removeCart(${i})" class="text-red-500 text-xs">✕ Xoá</button>
+      <div class="text-right flex flex-col items-end shrink-0">
+        <div class="font-bold text-blue-700 text-base leading-tight">${fmt(x.total)}</div>
+        <div class="text-[9px] text-slate-400">${x.uom||'sp'}</div>
+        <div class="flex gap-2 mt-1">
+          <button onclick="editCartItem(${i})" class="text-blue-600 text-[11px] font-semibold p-0.5" aria-label="Sửa">✏️</button>
+          <button onclick="removeCart(${i})" class="text-red-500 text-[11px] p-0.5" aria-label="Xóa">✕</button>
         </div>
       </div></div>`;
   }).join('');
@@ -1128,9 +1128,7 @@ async function submitFinal() {
   if (state.finalSubmitted) return toast('Đã gửi chính thức rồi', 'warn');
 
   const u = state.currentUser;
-  const draftWarn = state.savedStatus === 'draft'
-    ? `\n• Nháp hiện tại sẽ bị THAY THẾ bằng bản chính thức.`
-    : '';
+  const draftWarn = state.savedStatus === 'draft' ? `\n• Nháp hiện tại sẽ bị THAY THẾ bằng bản chính thức.` : '';
 
   if (!confirm(`GỬI CHÍNH THỨC ${state.cart.length} dòng?\nNgười TH: ${u.name} — ${u.phone}${draftWarn}`)) return;
   if (!confirm(`⚠️ XÁC NHẬN LẦN 2\n\nSau khi gửi chính thức:\n• Dữ liệu được LƯU CỐ ĐỊNH\n• Không thể sửa qua webapp\n• Bản nháp cũ bị xóa\n\nBạn có CHẮC CHẮN đã kiểm kê XONG?`)) return;
@@ -1228,6 +1226,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#loginUser').addEventListener('keydown', e => e.key==='Enter' && doLogin());
   $('#loginPhone').addEventListener('keydown', e => e.key==='Enter' && doLogin());
   $('#logoutBtn').onclick = logout;
+  $('#headerToggleBtn').onclick = toggleHeader;
   $('#reloadBtn').onclick = () => { if (confirm('Tải lại dữ liệu? (Xóa cache)')) clearSheetCache(); };
   $('#continuousBtn').onclick = toggleContinuous;
   $('#installBtn').onclick = installPWA;
@@ -1267,27 +1266,6 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#exportBtn').onclick = exportCSV;
   $('#saveDraftBtn').onclick = saveDraft;
   $('#submitBtn').onclick = submitFinal;
-
-  // Auto-collapse header
-  let headerCollapsed = false;
-  const headerExpanded = $('#headerExpanded');
-  const headerToggleBtn = $('#headerToggleBtn');
-  function setHeaderCollapsed(collapsed) {
-    if (collapsed === headerCollapsed) return;
-    headerCollapsed = collapsed;
-    if (collapsed) { headerExpanded.style.maxHeight = '0px'; headerExpanded.style.opacity = '0'; headerToggleBtn.style.transform = 'rotate(-90deg)'; }
-    else { headerExpanded.style.maxHeight = '300px'; headerExpanded.style.opacity = '1'; headerToggleBtn.style.transform = 'rotate(0deg)'; }
-  }
-  headerExpanded.style.maxHeight = '300px';
-  headerExpanded.style.transition = 'max-height 0.25s ease, opacity 0.2s ease';
-  headerToggleBtn.addEventListener('click', () => setHeaderCollapsed(!headerCollapsed));
-  let lastScrollY = 0;
-  window.addEventListener('scroll', () => {
-    const y = window.scrollY;
-    if (y > 60 && y > lastScrollY) setHeaderCollapsed(true);
-    else if (y < 20) setHeaderCollapsed(false);
-    lastScrollY = y;
-  }, { passive: true });
 
   boot();
 });
@@ -1330,85 +1308,94 @@ window.addEventListener('DOMContentLoaded', () => {
 </div>
 
 <!-- MAIN -->
-<div id="screen-main" class="hidden min-h-screen pb-32">
-  <header id="mainHeader" class="bg-blue-700 text-white sticky top-0 z-30 shadow-md transition-all duration-200">
-    <div class="max-w-2xl mx-auto px-4">
-      <div class="flex items-center justify-between gap-2 py-2">
-        <div class="flex items-center gap-2 min-w-0 flex-1">
-          <button id="headerToggleBtn" class="text-lg flex-shrink-0 transition-transform duration-200">▾</button>
-          <div class="min-w-0 flex-1">
-            <div class="text-[10px] opacity-75 leading-none">Nhà phân phối</div>
-            <div class="flex items-baseline gap-2 min-w-0">
-              <span id="distCodeCompact" class="font-mono text-xs opacity-90 flex-shrink-0"></span>
-              <span id="distNameCompact" class="font-bold text-sm truncate"></span>
-            </div>
+<div id="screen-main" class="hidden min-h-screen pb-24">
+  <header id="mainHeader" class="bg-blue-700 text-white sticky top-0 z-30 shadow-md">
+    <div class="max-w-2xl mx-auto px-3">
+      <!-- COMPACT ROW (always visible) -->
+      <div class="flex items-center gap-2 py-2">
+        <button id="headerToggleBtn" class="text-sm flex-shrink-0 w-6 h-6 flex items-center justify-center rounded bg-blue-800/60 transition-transform duration-200" aria-label="Mở rộng">▾</button>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-1.5 min-w-0">
+            <span id="distCodeCompact" class="font-mono text-[11px] opacity-80 flex-shrink-0"></span>
+            <span id="distNameCompact" class="font-bold text-[13px] truncate leading-tight"></span>
           </div>
         </div>
-        <button id="logoutBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1.5 rounded whitespace-nowrap">Đăng xuất</button>
+        <button id="logoutBtn" class="text-[10px] bg-blue-800/60 hover:bg-blue-900 px-2 py-1 rounded whitespace-nowrap">Thoát</button>
       </div>
-      <div id="headerExpanded" class="pb-3 border-t border-blue-600/40 overflow-hidden">
-        <div class="pt-2 space-y-1">
-          <div id="distName" class="font-bold text-sm truncate"></div>
-          <div id="distAlias" class="text-xs opacity-75 truncate"></div>
-          <div id="userInfo" class="text-xs opacity-90 truncate"></div>
-          <div id="sessionInfo" class="text-[10px] opacity-70 font-mono truncate"></div>
-          <div id="sessionStatus" class="text-[11px] mt-1 flex items-center"></div>
-          <div class="flex items-center gap-2 mt-1 flex-wrap">
-            <button id="reloadBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải lại</button>
-            <button id="continuousBtn" class="text-[10px] hover:opacity-90 px-2 py-1 rounded font-semibold">🔁 Quét liên tục</button>
-            <button id="restoreDraftBtn" class="text-[10px] bg-amber-600 hover:bg-amber-700 px-2 py-1 rounded">📥 Khôi phục nháp</button>
-            <span id="cacheInfo" class="text-[10px] opacity-70"></span>
-            <span id="offlineBadge" class="hidden text-[10px] bg-amber-500 text-white px-2 py-1 rounded offline-badge"></span>
+
+      <!-- EXPANDED SECTION -->
+      <div id="headerExpanded" class="header-expand">
+        <div class="pb-2.5 border-t border-blue-600/40 pt-2 space-y-1.5">
+          <div id="distName" class="font-semibold text-[12px] truncate"></div>
+          <div id="distAlias" class="text-[10px] opacity-75 truncate"></div>
+          <div class="flex items-center justify-between gap-2 text-[10px] opacity-90">
+            <span id="userInfo" class="truncate"></span>
+            <span id="sessionInfo" class="font-mono opacity-70 truncate flex-shrink-0"></span>
+          </div>
+          <div id="sessionStatus" class="text-[11px] flex items-center"></div>
+          <div class="flex items-center gap-1.5 pt-1 flex-wrap">
+            <button id="reloadBtn" class="text-[10px] bg-blue-800/60 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải</button>
+            <button id="continuousBtn" class="text-[10px] px-2 py-1 rounded font-semibold">🔁 Liên tục</button>
+            <button id="restoreDraftBtn" class="text-[10px] bg-amber-600 hover:bg-amber-700 px-2 py-1 rounded">📥 Nháp</button>
+            <span id="cacheInfo" class="text-[9px] opacity-60"></span>
+            <span id="offlineBadge" class="hidden text-[9px] bg-amber-500 text-white px-1.5 py-0.5 rounded offline-badge"></span>
           </div>
         </div>
       </div>
     </div>
   </header>
 
-  <main class="max-w-2xl mx-auto p-4 space-y-4">
-    <div class="grid grid-cols-2 gap-3">
-      <button id="scanBtn" class="bg-red-500 hover:bg-red-600 text-white font-semibold py-4 rounded-xl shadow flex flex-col items-center gap-1">
-        <span class="text-2xl">📷</span><span class="text-sm">Quét Barcode</span>
+  <main class="max-w-2xl mx-auto px-3 py-3 space-y-3">
+    <!-- ACTION BUTTONS -->
+    <div class="grid grid-cols-2 gap-2">
+      <button id="scanBtn" class="action-btn bg-red-500 hover:bg-red-600 text-white font-semibold py-3 rounded-lg shadow flex flex-col items-center justify-center gap-0.5">
+        <span class="text-xl">📷</span><span class="txt text-xs">Quét Barcode</span>
       </button>
-      <button id="searchBtn" class="bg-slate-700 hover:bg-slate-800 text-white font-semibold py-4 rounded-xl shadow flex flex-col items-center gap-1">
-        <span class="text-2xl">🔍</span><span class="text-sm">Tìm theo tên</span>
+      <button id="searchBtn" class="action-btn bg-slate-700 hover:bg-slate-800 text-white font-semibold py-3 rounded-lg shadow flex flex-col items-center justify-center gap-0.5">
+        <span class="text-xl">🔍</span><span class="txt text-xs">Tìm theo tên</span>
       </button>
-      <button id="itemCodeBtn" class="col-span-2 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 rounded-xl shadow flex items-center justify-center gap-2">
-        <span class="text-xl">⌨️</span><span class="text-sm">Nhập mã SP (không quét được)</span>
+      <button id="itemCodeBtn" class="col-span-2 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2.5 rounded-lg shadow flex items-center justify-center gap-2">
+        <span class="text-base">⌨️</span><span class="text-xs">Nhập mã SP (không quét được)</span>
       </button>
     </div>
 
-    <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200">
-      <div class="flex items-start justify-between gap-2">
+    <!-- GPS -->
+    <div class="bg-white rounded-lg p-2.5 shadow-sm border border-slate-200">
+      <div class="flex items-center justify-between gap-2">
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2"><span class="text-base">📍</span><div class="font-semibold text-sm text-slate-800">Vị trí kho kiểm kê</div></div>
-          <div id="locStatus" class="text-xs text-slate-500 mt-1">Chưa lấy vị trí</div>
-          <div id="locAddress" class="text-xs text-blue-700 mt-1 hidden font-medium"></div>
-          <div id="locCoords" class="text-[10px] text-slate-400 font-mono mt-0.5 hidden"></div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-sm">📍</span>
+            <span class="font-semibold text-[12px] text-slate-800">Vị trí kho</span>
+            <span id="locStatus" class="text-[10px] text-slate-500 ml-1 truncate">Chưa lấy</span>
+          </div>
+          <div id="locAddress" class="text-[11px] text-blue-700 mt-0.5 hidden font-medium truncate"></div>
+          <div id="locCoords" class="text-[9px] text-slate-400 font-mono mt-0.5 hidden"></div>
         </div>
-        <label class="flex items-center gap-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 px-2 py-1.5 rounded-lg cursor-pointer select-none flex-shrink-0">
-          <input id="locEnable" type="checkbox" class="w-4 h-4 rounded border-blue-300 text-blue-600 focus:ring-blue-500" />
+        <label class="flex items-center gap-1 text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200 px-2 py-1 rounded-lg cursor-pointer select-none flex-shrink-0">
+          <input id="locEnable" type="checkbox" class="w-3.5 h-3.5 rounded border-blue-300 text-blue-600 focus:ring-blue-500" />
           <span>Lấy vị trí</span>
         </label>
       </div>
     </div>
 
-    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 grid grid-cols-2 gap-3 text-center">
-      <div><div class="text-xs text-slate-500">Số dòng</div><div id="sumSkus" class="text-2xl font-bold text-slate-800">0</div></div>
-      <div><div class="text-xs text-slate-500">Tổng số lượng</div><div id="sumQty" class="text-2xl font-bold text-blue-700">0</div></div>
+    <!-- SUMMARY -->
+    <div class="bg-white rounded-lg py-2.5 px-3 shadow-sm border border-slate-200 grid grid-cols-2 gap-2 text-center">
+      <div><div class="text-[10px] text-slate-500 uppercase tracking-wide">Số dòng</div><div id="sumSkus" class="text-xl font-bold text-slate-800 leading-tight">0</div></div>
+      <div><div class="text-[10px] text-slate-500 uppercase tracking-wide">Tổng SL</div><div id="sumQty" class="text-xl font-bold text-blue-700 leading-tight">0</div></div>
     </div>
 
-    <h2 class="font-semibold text-slate-700 flex items-center gap-2">
-      Danh sách đã kiểm <span id="cartCount" class="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full">0</span>
+    <h2 class="font-semibold text-[13px] text-slate-700 flex items-center gap-1.5">
+      Danh sách đã kiểm <span id="cartCount" class="bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full">0</span>
     </h2>
-    <div id="cartList" class="space-y-2"></div>
+    <div id="cartList" class="space-y-1.5"></div>
   </main>
 
-  <div class="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-2xl z-30">
-    <div class="max-w-2xl mx-auto p-3 grid grid-cols-3 gap-2">
-      <button id="exportBtn" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl text-sm">⬇ CSV</button>
-      <button id="saveDraftBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 rounded-xl text-sm">💾 Lưu nháp</button>
-      <button id="submitBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">✅ Chính thức</button>
+  <!-- BOTTOM BAR -->
+  <div class="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-2xl z-30" style="padding-bottom: env(safe-area-inset-bottom);">
+    <div class="max-w-2xl mx-auto p-2 grid grid-cols-3 gap-1.5">
+      <button id="exportBtn" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-2.5 rounded-lg text-[12px]">⬇ CSV</button>
+      <button id="saveDraftBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2.5 rounded-lg text-[12px]">💾 Nháp</button>
+      <button id="submitBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-[12px]">✅ Chính thức</button>
     </div>
   </div>
 </div>
@@ -1418,7 +1405,7 @@ window.addEventListener('DOMContentLoaded', () => {
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl max-h-[85vh] flex flex-col">
     <div class="p-4 border-b border-slate-200 flex items-center justify-between">
       <div>
-        <h3 class="font-bold text-slate-800 text-lg">📥 Phiên nháp đã lưu</h3>
+        <h3 class="font-bold text-slate-800 text-base">📥 Phiên nháp đã lưu</h3>
         <p class="text-xs text-slate-500 mt-0.5">Chọn phiên để khôi phục giỏ hàng</p>
       </div>
       <button id="closeDraftsBtn" class="text-2xl text-slate-500 px-2">✕</button>
@@ -1429,15 +1416,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
 <!-- SCANNER MODAL -->
 <div id="scanModal" class="hidden fixed inset-0 bg-black z-50 flex flex-col">
-  <div class="flex items-center justify-between p-4 text-white">
-    <h3 class="font-semibold">Quét barcode</h3>
+  <div class="flex items-center justify-between p-3 text-white">
+    <h3 class="font-semibold text-base">Quét barcode</h3>
     <button id="closeScanBtn" class="text-3xl leading-none">✕</button>
   </div>
-  <div class="flex-1 flex items-center justify-center p-4">
+  <div class="flex-1 flex items-center justify-center p-3">
     <div class="w-full max-w-md relative">
-      <div id="reader" class="bg-black rounded-xl overflow-hidden w-full" style="min-height: 280px;"></div>
+      <div id="reader" class="bg-black rounded-xl overflow-hidden w-full" style="min-height: 260px;"></div>
       <div class="scan-line"></div>
-      <button id="flashBtn" class="hidden absolute top-3 right-3 w-11 h-11 rounded-full bg-white/25 hover:bg-white/40 text-white flex items-center justify-center text-2xl backdrop-blur z-20">🔦</button>
+      <button id="flashBtn" class="hidden absolute top-3 right-3 w-10 h-10 rounded-full bg-white/25 hover:bg-white/40 text-white flex items-center justify-center text-xl backdrop-blur z-20">🔦</button>
       <div id="scanError" class="hidden absolute inset-0 flex flex-col items-center justify-center text-white p-6 text-center bg-black rounded-xl z-10">
         <div class="text-4xl mb-3">⚠️</div>
         <p id="scanErrorMsg" class="text-sm opacity-90 mb-2 font-semibold"></p>
@@ -1446,8 +1433,8 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
     </div>
   </div>
-  <div class="pb-6 px-4">
-    <p class="text-center text-white/70 text-sm mb-3">Đưa barcode vào khung</p>
+  <div class="pb-4 px-3">
+    <p class="text-center text-white/70 text-xs mb-2">Đưa barcode vào khung</p>
     <div class="flex justify-center">
       <button id="scanToManualBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-4 rounded-lg text-sm">⌨️ Không quét được? Nhập mã SP</button>
     </div>
@@ -1457,9 +1444,9 @@ window.addEventListener('DOMContentLoaded', () => {
 <!-- SEARCH MODAL -->
 <div id="searchModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl max-h-[85vh] flex flex-col">
-    <div class="p-4 border-b border-slate-200 flex items-center gap-2">
+    <div class="p-3 border-b border-slate-200 flex items-center gap-2">
       <input id="searchInput" type="text" placeholder="Tìm theo tên / mã SP..."
-        class="flex-1 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
       <button id="closeSearchBtn" class="text-2xl text-slate-500 px-2">✕</button>
     </div>
     <div id="searchResults" class="overflow-y-auto flex-1"></div>
@@ -1468,10 +1455,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
 <!-- ITEM CODE MODAL -->
 <div id="itemCodeModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
-  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-5">
-    <div class="flex items-start justify-between gap-2 mb-4">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl p-4">
+    <div class="flex items-start justify-between gap-2 mb-3">
       <div>
-        <h3 class="font-bold text-slate-800 text-lg">Nhập mã sản phẩm</h3>
+        <h3 class="font-bold text-slate-800 text-base">Nhập mã sản phẩm</h3>
         <p class="text-xs text-slate-500 mt-0.5">Nhập mã ItemCode, hoặc tìm theo tên SP</p>
       </div>
       <button id="closeItemCodeBtn" class="text-2xl text-slate-500 px-2">✕</button>
@@ -1479,12 +1466,12 @@ window.addEventListener('DOMContentLoaded', () => {
     <div id="itemCodeWarn" class="hidden"></div>
     <label class="text-xs font-semibold text-slate-600">Mã sản phẩm (ItemCode)</label>
     <input id="itemCodeInput" type="text" autocomplete="off" placeholder="VD: 81002529"
-      class="w-full border border-slate-300 rounded-lg px-3 py-3 text-lg font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-    <div id="itemCodePreview" class="mt-3 hidden"></div>
-    <button id="gotoSearchBtn" class="w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-semibold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2">🔍 Không biết mã? Tìm theo tên SP</button>
-    <div class="grid grid-cols-2 gap-3 mt-5">
-      <button id="itemCodeCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
-      <button id="itemCodeNextBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Tiếp tục</button>
+      class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-base font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+    <div id="itemCodePreview" class="mt-2 hidden"></div>
+    <button id="gotoSearchBtn" class="w-full mt-2.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-semibold py-2 rounded-lg text-sm flex items-center justify-center gap-2">🔍 Không biết mã? Tìm theo tên SP</button>
+    <div class="grid grid-cols-2 gap-2 mt-4">
+      <button id="itemCodeCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-2.5 rounded-lg">Huỷ</button>
+      <button id="itemCodeNextBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg">Tiếp tục</button>
     </div>
   </div>
 </div>
@@ -1492,60 +1479,60 @@ window.addEventListener('DOMContentLoaded', () => {
 <!-- QTY MODAL -->
 <div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 max-h-[90vh] overflow-y-auto">
-    <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-5 pt-4 pb-3 z-20">
-      <div class="flex items-start gap-3">
-        <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl flex-shrink-0">📦</div>
+    <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-4 pt-3 pb-2.5 z-20">
+      <div class="flex items-start gap-2.5">
+        <div class="w-9 h-9 rounded-full bg-blue-600 text-white flex items-center justify-center text-lg flex-shrink-0">📦</div>
         <div class="flex-1 min-w-0">
-          <div id="qtyModalMode" class="hidden text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded inline-block mb-1">✏️ ĐANG SỬA DÒNG</div>
-          <h3 id="qtyItemName" class="font-bold text-blue-900 text-base leading-tight"></h3>
-          <p id="qtyItemMeta" class="text-xs text-slate-500 mt-1"></p>
+          <div id="qtyModalMode" class="hidden text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded inline-block mb-0.5">✏️ ĐANG SỬA</div>
+          <h3 id="qtyItemName" class="font-bold text-blue-900 text-[15px] leading-tight"></h3>
+          <p id="qtyItemMeta" class="text-[11px] text-slate-500 mt-0.5"></p>
         </div>
       </div>
-      <button id="copyPrevBtn" class="hidden w-full mt-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">📋 Dùng lại: ...</button>
+      <button id="copyPrevBtn" class="hidden w-full mt-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-[11px] font-semibold py-1.5 rounded-lg">📋 Dùng lại: ...</button>
     </div>
-    <div class="px-5 pb-5">
-      <div class="grid grid-cols-2 gap-3 mt-4">
-        <div><label class="text-xs font-semibold text-slate-600">Số thùng</label>
+    <div class="px-4 pb-4">
+      <div class="grid grid-cols-2 gap-2 mt-3">
+        <div><label class="text-[11px] font-semibold text-slate-600">Số thùng</label>
           <input id="qtyCases" type="number" inputmode="numeric" min="0" placeholder="0"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
-        <div><label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
+        <div><label class="text-[11px] font-semibold text-slate-600">Số gói lẻ</label>
           <input id="qtyPacks" type="number" inputmode="numeric" min="0" placeholder="0"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
       </div>
-      <div class="mt-4 pt-4 border-t border-slate-200">
+      <div class="mt-3 pt-3 border-t border-slate-200">
         <div class="flex items-center justify-between mb-2">
-          <div class="text-xs font-bold text-slate-700 uppercase tracking-wide">Thông tin sản xuất</div>
-          <label class="flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg cursor-pointer select-none">
-            <input id="skipProdInfo" type="checkbox" class="w-4 h-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
+          <div class="text-[11px] font-bold text-slate-700 uppercase tracking-wide">Thông tin sản xuất</div>
+          <label class="flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-lg cursor-pointer select-none">
+            <input id="skipProdInfo" type="checkbox" class="w-3.5 h-3.5 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
             <span>Bỏ qua Line/Ca/Máy</span>
           </label>
         </div>
-        <div><label class="text-xs font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
-          <input id="qtyProdDate" type="date" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
+        <div><label class="text-[11px] font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
+          <input id="qtyProdDate" type="date" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
         <div id="prodInfoFields" class="transition-opacity">
-          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Máy đóng gói số</label>
+          <div class="mt-2.5"><label class="text-[11px] font-semibold text-slate-600">Máy đóng gói số</label>
             <input id="qtyPackMachine" type="text" list="machineList" placeholder="VD: Máy 3"
-              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
             <datalist id="machineList"></datalist></div>
-          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
-            <select id="qtyProdLine" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+          <div class="mt-2.5"><label class="text-[11px] font-semibold text-slate-600">Line sản xuất</label>
+            <select id="qtyProdLine" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
             <input id="qtyProdLineOther" type="text" placeholder="Nhập tên Line..."
-              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" /></div>
-          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
-            <select id="qtyProdShift" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 mt-1.5" /></div>
+          <div class="mt-2.5"><label class="text-[11px] font-semibold text-slate-600">Ca sản xuất</label>
+            <select id="qtyProdShift" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
             <input id="qtyProdShiftOther" type="text" placeholder="Nhập tên Ca..."
-              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" /></div>
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 mt-1.5" /></div>
         </div>
       </div>
-      <div class="mt-4 bg-slate-50 rounded-lg p-3">
-        <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
+      <div class="mt-3 bg-slate-50 rounded-lg p-2.5">
+        <label class="text-[11px] font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
         <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
           class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg font-bold text-blue-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-        <p id="qtyBreakdown" class="text-xs text-slate-500 mt-2"></p>
+        <p id="qtyBreakdown" class="text-[10px] text-slate-500 mt-1.5"></p>
       </div>
-      <div class="grid grid-cols-2 gap-3 mt-5">
-        <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
-        <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Thêm</button>
+      <div class="grid grid-cols-2 gap-2 mt-4">
+        <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-2.5 rounded-lg">Huỷ</button>
+        <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg">Thêm</button>
       </div>
     </div>
   </div>
