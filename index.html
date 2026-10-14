@@ -14,8 +14,9 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
 <style>
+  body.modal-open { overflow: hidden; }
   body { -webkit-tap-highlight-color: transparent; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .scan-line { position:absolute; top:10%; left:0; width:100%; height:3px; background:linear-gradient(90deg,transparent,#ef4444,transparent); animation:scan 2s linear infinite; pointer-events:none; z-index:15; }
   @keyframes scan { 0%{top:10%} 50%{top:90%} 100%{top:10%} }
@@ -102,7 +103,7 @@ const state = {
   continuousMode: localStorage.getItem('kks_continuous') === 'true',
   torchOn: false,
   isDirty: false,
-  savedStatus: 'none',           // 'none' | 'draft' | 'final'
+  savedStatus: 'none',
   lastSavedAt: null,
   autoSaveEnabled: localStorage.getItem('kks_autosave') !== 'false',
   finalSubmitted: false
@@ -142,6 +143,26 @@ const genSessionId = () => {
   const rnd = Math.random().toString(36).slice(2,6).toUpperCase();
   return `${stamp}-${rnd}`;
 };
+
+// ============ MODAL HELPERS ============
+function openModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('hidden');
+  document.body.classList.add('modal-open');
+}
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add('hidden');
+  const anyOpen = ['qtyModal','scanModal','searchModal','itemCodeModal','draftsModal'].some(
+    mid => { const m = document.getElementById(mid); return m && !m.classList.contains('hidden'); }
+  );
+  if (!anyOpen) document.body.classList.remove('modal-open');
+}
+function isAnyModalOpen() {
+  return ['qtyModal','scanModal','searchModal','itemCodeModal','draftsModal'].some(
+    mid => { const m = document.getElementById(mid); return m && !m.classList.contains('hidden'); }
+  );
+}
 
 function findItemByScanCode(code) {
   const k = normKey(code);
@@ -384,7 +405,6 @@ function doLogin() {
   state.isDirty = false; state.savedStatus = 'none'; state.lastSavedAt = null; state.finalSubmitted = false;
   saveSession();
   showScreen('main'); renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
-  // Check drafts
   setTimeout(() => checkDraftsOnLogin(), 500);
 }
 
@@ -446,7 +466,7 @@ function renderSessionStatus() {
   el.innerHTML = `<span class="status-dot" style="background:#94a3b8"></span><span>Chưa có dữ liệu</span>`;
 }
 
-// ============ CHECK DRAFTS ON LOGIN ============
+// ============ CHECK DRAFTS ============
 async function checkDraftsOnLogin() {
   if (!state.currentUser) return;
   try {
@@ -454,30 +474,22 @@ async function checkDraftsOnLogin() {
     const url = `${CONFIG.APPS_SCRIPT_URL}?action=list-drafts&phone=${encodeURIComponent(u.phone)}&dist=${encodeURIComponent(state.currentDistributor.code)}`;
     const res = await fetch(url);
     const data = await res.json();
-    if (data.ok && data.drafts && data.drafts.length > 0) {
-      showDraftsModal(data.drafts);
-    }
+    if (data.ok && data.drafts && data.drafts.length > 0) showDraftsModal(data.drafts);
   } catch(e) { console.warn('checkDrafts error:', e); }
 }
-
 function showDraftsModal(drafts) {
-  const html = drafts.map((d, i) => {
+  const html = drafts.map((d) => {
     const ts = new Date(d.timestamp);
     const tsStr = ts.toLocaleString('vi-VN', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
-    return `
-      <button onclick="restoreDraft('${d.sessionId}')" 
-        class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100">
-        <div class="font-semibold text-slate-800 text-sm">🔑 ${d.sessionId}</div>
-        <div class="text-xs text-slate-500 mt-0.5">
-          ${tsStr} • ${d.count} dòng • ${d.distName || d.distCode}
-        </div>
-      </button>`;
+    return `<button onclick="restoreDraft('${d.sessionId}')" class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100">
+      <div class="font-semibold text-slate-800 text-sm">🔑 ${d.sessionId}</div>
+      <div class="text-xs text-slate-500 mt-0.5">${tsStr} • ${d.count} dòng • ${d.distName || d.distCode}</div>
+    </button>`;
   }).join('');
-
   $('#draftsList').innerHTML = html;
-  $('#draftsModal').classList.remove('hidden');
+  openModal('draftsModal');
 }
-function closeDraftsModal() { $('#draftsModal').classList.add('hidden'); }
+function closeDraftsModal() { closeModal('draftsModal'); }
 
 async function restoreDraft(sessionId) {
   if (state.cart.length > 0) {
@@ -516,9 +528,15 @@ let lastDetected = { code:'', t:0 }, zxingReader = null, scanEngine = null;
 const hasNativeDetector = () => 'BarcodeDetector' in window;
 
 async function openScanner() {
-  $('#scanModal').classList.remove('hidden'); $('#scanError').classList.add('hidden'); $('#flashBtn').classList.add('hidden');
+  openModal('scanModal');
+  $('#scanError').classList.add('hidden');
+  $('#flashBtn').classList.add('hidden');
   scanEngine = hasNativeDetector() ? 'native' : 'zxing';
-  if (scanEngine === 'zxing' && typeof ZXing === 'undefined') { showScanError('Không tải được thư viện quét', 'Kiểm tra mạng và thử lại.'); return; }
+  console.log('[Scanner] Engine:', scanEngine);
+  if (scanEngine === 'zxing' && typeof ZXing === 'undefined') {
+    showScanError('Không tải được thư viện quét', 'Kiểm tra mạng và thử lại.');
+    return;
+  }
   try {
     const reader = $('#reader');
     reader.innerHTML = '<video id="scanVideo" autoplay playsinline muted style="width:100%;height:auto;border-radius:12px;"></video>';
@@ -526,11 +544,13 @@ async function openScanner() {
     scanStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }, audio:false
     });
-    scanVideoEl.srcObject = scanStream; await scanVideoEl.play();
+    scanVideoEl.srcObject = scanStream;
+    await scanVideoEl.play();
     const track = scanStream.getVideoTracks()[0];
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     if (caps.torch) $('#flashBtn').classList.remove('hidden');
-    if (scanEngine === 'native') await startNativeScanner(); else await startZXingScanner();
+    if (scanEngine === 'native') await startNativeScanner();
+    else await startZXingScanner();
   } catch (e) {
     console.error('Scanner error:', e);
     let msg = 'Không mở được camera', hint = e.message || e.name || '';
@@ -565,7 +585,19 @@ async function startNativeScanner() {
   scanRAF = requestAnimationFrame(scanLoop);
 }
 
+// ===== ZXing fallback cho iOS: dùng Canvas + HybridBinarizer =====
 async function startZXingScanner() {
+  // Chờ video ready
+  await new Promise((resolve) => {
+    const check = () => {
+      if (scanVideoEl && scanVideoEl.readyState >= 2 && scanVideoEl.videoWidth > 0) resolve();
+      else setTimeout(check, 100);
+    };
+    check();
+  });
+
+  console.log('[ZXing] Video ready:', scanVideoEl.videoWidth, 'x', scanVideoEl.videoHeight);
+
   const hints = new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
@@ -574,20 +606,75 @@ async function startZXingScanner() {
     ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.QR_CODE, ZXing.BarcodeFormat.DATA_MATRIX
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  const reader = new ZXing.BrowserMultiFormatReader(hints, { delayBetweenScanAttempts:250, delayBetweenScanSuccess:1500 });
-  try {
-    await reader.decodeFromVideoElement(scanVideoEl, (result, err) => {
-      if (result && scanEngine === 'zxing') {
-        const code = result.getText(), now = Date.now();
-        if (code !== lastDetected.code || now - lastDetected.t > 2000) {
-          lastDetected = { code, t: now };
+  hints.set(ZXing.DecodeHintType.PURE_BARCODE, false);
+
+  const reader = new ZXing.BrowserMultiFormatReader(hints);
+
+  // Canvas ẩn để vẽ frame
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  let lastScan = 0;
+  const MIN_SCAN_INTERVAL = 150;
+
+  const scanLoop = () => {
+    if (!scanVideoEl || scanEngine !== 'zxing') return;
+
+    const now = Date.now();
+    if (now - lastScan < MIN_SCAN_INTERVAL) {
+      scanRAF = requestAnimationFrame(scanLoop);
+      return;
+    }
+    lastScan = now;
+
+    try {
+      const vw = scanVideoEl.videoWidth;
+      const vh = scanVideoEl.videoHeight;
+      if (!vw || !vh) {
+        scanRAF = requestAnimationFrame(scanLoop);
+        return;
+      }
+
+      // Scale xuống max 1280px để tăng tốc
+      const maxSide = 1280;
+      let dw = vw, dh = vh;
+      if (Math.max(vw, vh) > maxSide) {
+        const scale = maxSide / Math.max(vw, vh);
+        dw = Math.round(vw * scale);
+        dh = Math.round(vh * scale);
+      }
+      canvas.width = dw;
+      canvas.height = dh;
+      ctx.drawImage(scanVideoEl, 0, 0, dw, dh);
+
+      // ZXing decode từ canvas
+      const luminance = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+      const binarizer = new ZXing.HybridBinarizer(luminance);
+      const bitmap = new ZXing.BinaryBitmap(binarizer);
+      const result = reader.decodeBitmap(bitmap);
+
+      if (result && result.getText()) {
+        const code = result.getText();
+        const codeNow = Date.now();
+        console.log('[ZXing] Detected:', code);
+        if (code !== lastDetected.code || codeNow - lastDetected.t > 2000) {
+          lastDetected = { code, t: codeNow };
           if (navigator.vibrate) navigator.vibrate(80);
           onBarcodeDetected(code);
+          return;
         }
       }
-    });
-    zxingReader = reader;
-  } catch (err) { showScanError('Không quét được', 'Dùng "Nhập mã SP".'); }
+    } catch (e) {
+      if (e.name && e.name !== 'NotFoundException') {
+        console.warn('[ZXing] error:', e.name, e.message);
+      }
+    }
+
+    scanRAF = requestAnimationFrame(scanLoop);
+  };
+
+  zxingReader = reader;
+  scanRAF = requestAnimationFrame(scanLoop);
 }
 
 async function closeScanner() {
@@ -597,7 +684,8 @@ async function closeScanner() {
   if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
   scanVideoEl = null; barcodeDetector = null; state.torchOn = false;
   $('#flashBtn').classList.add('hidden'); $('#flashBtn').classList.remove('bg-yellow-400','text-black');
-  $('#scanError').classList.add('hidden'); $('#scanModal').classList.add('hidden');
+  $('#scanError').classList.add('hidden');
+  closeModal('scanModal');
 }
 
 async function toggleTorch() {
@@ -634,11 +722,11 @@ function onBarcodeDetected(code) {
 
 // ============ SEARCH ============
 function openSearch() {
-  $('#searchModal').classList.remove('hidden');
+  openModal('searchModal');
   $('#searchInput').value = ''; renderSearchResults('');
   setTimeout(() => $('#searchInput').focus(), 100);
 }
-function closeSearch() { $('#searchModal').classList.add('hidden'); }
+function closeSearch() { closeModal('searchModal'); }
 function renderSearchResults(q) {
   const nq = normalize(q); const box = $('#searchResults');
   if (!q || q.length < 2) {
@@ -671,7 +759,7 @@ function pickSearchResult(code) {
 
 // ============ ITEM CODE MODAL ============
 function openItemCodeModal(prefillCode, codeType) {
-  $('#itemCodeModal').classList.remove('hidden');
+  openModal('itemCodeModal');
   $('#itemCodeInput').value = prefillCode || '';
   $('#itemCodePreview').innerHTML = ''; $('#itemCodePreview').classList.add('hidden');
   $('#itemCodeWarn').classList.add('hidden');
@@ -685,7 +773,7 @@ function openItemCodeModal(prefillCode, codeType) {
   setTimeout(() => $('#itemCodeInput').focus(), 120);
 }
 function closeItemCodeModal() {
-  $('#itemCodeModal').classList.add('hidden'); $('#itemCodeInput').value = '';
+  closeModal('itemCodeModal'); $('#itemCodeInput').value = '';
   $('#itemCodePreview').classList.add('hidden'); $('#itemCodeWarn').classList.add('hidden');
 }
 function onItemCodeInput() {
@@ -803,7 +891,7 @@ function openQtyModal(item, prefillRow) {
     $('#skipProdInfo').checked = false; toggleSkipProdInfo();
   }
   updateQtyTotal();
-  $('#qtyModal').classList.remove('hidden');
+  openModal('qtyModal');
   setTimeout(() => $('#qtyCases').focus(), 200);
 }
 function updateCopyPrevButton() {
@@ -856,7 +944,7 @@ function toggleSkipProdInfo() {
   const skip = $('#skipProdInfo').checked; const wrap = $('#prodInfoFields');
   if (skip) wrap.classList.add('skip-mode'); else wrap.classList.remove('skip-mode');
 }
-function closeQtyModal() { $('#qtyModal').classList.add('hidden'); currentItem = null; state.editingIndex = null; }
+function closeQtyModal() { closeModal('qtyModal'); currentItem = null; state.editingIndex = null; }
 function updateQtyTotal() {
   if (!currentItem) return;
   const c = parseFloat($('#qtyCases').value) || 0, p = parseFloat($('#qtyPacks').value) || 0;
@@ -1057,10 +1145,7 @@ async function submitFinal() {
   };
   const payloadStr = JSON.stringify(payload);
 
-  if (!navigator.onLine) {
-    toast('Không thể gửi chính thức khi offline', 'error');
-    return;
-  }
+  if (!navigator.onLine) { toast('Không thể gửi chính thức khi offline', 'error'); return; }
 
   try {
     toast('Đang gửi...', 'info');
@@ -1078,7 +1163,6 @@ async function submitFinal() {
     saveSession(); renderSessionStatus();
     toastLong(`✅ Đã gửi chính thức!\nSession: ${oldSessionId}`, 'success', 5000);
 
-    // Sau 2s: clear cart + reset cho session mới
     setTimeout(() => {
       if (!confirm('Đã gửi xong. Xóa giỏ hàng và bắt đầu phiên mới?')) return;
       state.cart = [];
@@ -1091,7 +1175,6 @@ async function submitFinal() {
       saveSession(); renderCart(); renderSessionStatus(); renderDistHeader();
       toast('Đã bắt đầu phiên mới', 'success');
     }, 2200);
-
   } catch(e) {
     toast('Lỗi gửi: ' + e.message, 'error');
   }
@@ -1100,6 +1183,7 @@ async function submitFinal() {
 // ============ AUTO-SAVE ============
 setInterval(() => {
   if (!state.autoSaveEnabled) return;
+  if (isAnyModalOpen()) return;
   if (!state.isDirty) return;
   if (!state.cart.length) return;
   if (!state.currentUser) return;
@@ -1294,7 +1378,6 @@ window.addEventListener('DOMContentLoaded', () => {
       </button>
     </div>
 
-    <!-- GPS -->
     <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200">
       <div class="flex items-start justify-between gap-2">
         <div class="flex-1 min-w-0">
@@ -1407,8 +1490,8 @@ window.addEventListener('DOMContentLoaded', () => {
 </div>
 
 <!-- QTY MODAL -->
-<div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center overflow-y-auto">
-  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 overflow-hidden">
+<div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 max-h-[90vh] overflow-y-auto">
     <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-5 pt-4 pb-3 z-20">
       <div class="flex items-start gap-3">
         <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl flex-shrink-0">📦</div>
