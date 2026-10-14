@@ -56,6 +56,10 @@ if ('serviceWorker' in navigator) {
   });
 }
 let deferredPrompt = null;
+let autoSaveDebounceTimer = null;
+let autoSaveInProgress = false;
+let lastSavedHash = '';
+
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault(); deferredPrompt = e;
   const btn = document.getElementById('installBtn');
@@ -88,7 +92,8 @@ const CONFIG = {
   OTHER_VALUE: 'Orther',
   DEFAULT_LINE:'', DEFAULT_SHIFT:'', DEFAULT_MACHINE:'',
   DUP_WINDOW_MIN: 5,
-  AUTOSAVE_SEC: 30,
+  AUTOSAVE_INTERVAL_SEC: 15,
+  AUTOSAVE_DEBOUNCE_MS: 3000,
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwo-P3P79v9ZgSuM3tJVlNOMlfBmEDWH6bNFRK8_CYG6ION-1xtO_KlgKk2MeOk5GVf/exec'
 };
 
@@ -168,9 +173,7 @@ function saveLoginMemory(data) {
 function loadLoginMemory() {
   try { return JSON.parse(localStorage.getItem('kks_login_memory') || 'null'); } catch(_) { return null; }
 }
-function clearLoginMemory() {
-  localStorage.removeItem('kks_login_memory');
-}
+function clearLoginMemory() { localStorage.removeItem('kks_login_memory'); }
 function restoreLoginMemory() {
   const mem = loadLoginMemory();
   if (!mem || !mem.remember) return;
@@ -206,7 +209,17 @@ function findItemByScanCode(code) {
   if (state.itemByPosCsCode.has(k)) return { item: state.itemByPosCsCode.get(k), type:'poscs' };
   return null;
 }
-function markDirty() { state.isDirty = true; renderSessionStatus(); }
+
+// ============ MARK DIRTY + DEBOUNCED AUTOSAVE ============
+function markDirty() {
+  state.isDirty = true;
+  renderSessionStatus();
+  if (autoSaveDebounceTimer) clearTimeout(autoSaveDebounceTimer);
+  autoSaveDebounceTimer = setTimeout(() => {
+    autoSaveDebounceTimer = null;
+    safeAutoSave('debounced');
+  }, CONFIG.AUTOSAVE_DEBOUNCE_MS);
+}
 
 // ============ HEADER TOGGLE ============
 function setHeaderOpen(open) {
@@ -226,7 +239,6 @@ function toggleHeader() {
 function setLocStatus(text, color='text-slate-500') {
   const el = $('#locStatus'); if (el) { el.className = 'text-[10px] ml-1 truncate ' + color; el.textContent = text; }
 }
-
 async function fetchLocation() {
   let permState = 'unknown';
   if (navigator.permissions) {
@@ -235,7 +247,6 @@ async function fetchLocation() {
       permState = r.state;
     } catch(_) {}
   }
-
   if (permState === 'denied') {
     setLocStatus('❌ Đã từ chối quyền vị trí', 'text-red-600');
     showLocationGuide();
@@ -243,7 +254,6 @@ async function fetchLocation() {
     $('#locEnable').checked = false;
     return;
   }
-
   setLocStatus('⏳ Đang lấy vị trí...', 'text-blue-600');
   $('#locAddress').classList.add('hidden');
   $('#locCoords').classList.add('hidden');
@@ -267,7 +277,7 @@ async function fetchLocation() {
       renderLocationFull();
       $('#locSupplementWrap').classList.remove('hidden');
       setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
-      markDirty(); saveSession();
+      markDirty();
     },
     (err) => {
       let msg = '❌ Không lấy được vị trí';
@@ -281,7 +291,6 @@ async function fetchLocation() {
     { enableHighAccuracy:true, timeout:20000, maximumAge:0 }
   );
 }
-
 function renderLocationFull() {
   const L = state.location;
   const parts = [L.supplement, L.address].filter(Boolean);
@@ -291,7 +300,6 @@ function renderLocationFull() {
   if (full) { el.textContent = '📍 ' + full; el.classList.remove('hidden'); }
   else el.classList.add('hidden');
 }
-
 function toggleLocation() {
   const on = $('#locEnable').checked;
   state.location.enabled = on;
@@ -303,10 +311,9 @@ function toggleLocation() {
     $('#locCoords').classList.add('hidden');
     $('#locSupplementWrap').classList.add('hidden');
     const sup = $('#locSupplement'); if (sup) sup.value = '';
-    saveSession();
+    markDirty();
   }
 }
-
 function renderLocation() {
   const L = state.location;
   const chk = $('#locEnable'); if (chk) chk.checked = L.enabled;
@@ -319,12 +326,10 @@ function renderLocation() {
     setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
   }
 }
-
 function showLocationGuide() {
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
   const isAndroid = /Android/.test(navigator.userAgent);
   let html = '';
-
   if (isIOS) {
     html = `
       <div class="text-sm text-slate-700 space-y-3">
@@ -362,7 +367,6 @@ function showLocationGuide() {
   } else {
     html = `<p class="text-sm text-slate-700">Bạn cần cho phép truy cập vị trí trong cài đặt trình duyệt.</p>`;
   }
-
   $('#locationGuideContent').innerHTML = html;
   openModal('locationGuideModal');
 }
@@ -515,9 +519,7 @@ function doLogin() {
   if (!q)        return toast('Nhập mã nhà phân phối', 'error');
   if (!userName) return toast('Nhập tên nhân viên thực hiện', 'error');
   if (!userPhone) return toast('Nhập số điện thoại', 'error');
-  if (!isValidPhoneVN(userPhone)) {
-    return toast('SĐT không hợp lệ. Cần 10 số, bắt đầu 03-09 (VD: 0912345678)', 'error');
-  }
+  if (!isValidPhoneVN(userPhone)) return toast('SĐT không hợp lệ. Cần 10 số, bắt đầu 03-09', 'error');
 
   const key = normKey(q);
   let found = state.distributorIndex.get(key);
@@ -531,10 +533,7 @@ function doLogin() {
   if (!found) return toast('Không tìm thấy NPP: ' + q, 'error');
 
   if (remember) {
-    saveLoginMemory({
-      dist: q, userName: userName, phone: userPhone,
-      remember: true, savedAt: new Date().toISOString()
-    });
+    saveLoginMemory({ dist: q, userName: userName, phone: userPhone, remember: true, savedAt: new Date().toISOString() });
   } else {
     clearLoginMemory();
   }
@@ -545,6 +544,7 @@ function doLogin() {
   state.location = { enabled:false, lat:null, lng:null, address:'', supplement:'', accuracy:null, ts:null };
   state.cart = []; state.recentScans = {};
   state.isDirty = false; state.savedStatus = 'none'; state.lastSavedAt = null; state.finalSubmitted = false;
+  lastSavedHash = '';
   saveSession();
   showScreen('main'); renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
   setHeaderOpen(false);
@@ -570,12 +570,14 @@ function logout() {
 }
 
 function saveSession() {
-  localStorage.setItem('kks_session', JSON.stringify({
-    currentDistributor: state.currentDistributor, currentUser: state.currentUser,
-    sessionId: state.sessionId, location: state.location, cart: state.cart,
-    isDirty: state.isDirty, savedStatus: state.savedStatus, lastSavedAt: state.lastSavedAt,
-    finalSubmitted: state.finalSubmitted
-  }));
+  try {
+    localStorage.setItem('kks_session', JSON.stringify({
+      currentDistributor: state.currentDistributor, currentUser: state.currentUser,
+      sessionId: state.sessionId, location: state.location, cart: state.cart,
+      isDirty: state.isDirty, savedStatus: state.savedStatus, lastSavedAt: state.lastSavedAt,
+      finalSubmitted: state.finalSubmitted
+    }));
+  } catch(_) {}
 }
 function saveProdDefaults() { localStorage.setItem('kks_prod_defaults', JSON.stringify(state.defaults)); }
 
@@ -636,7 +638,6 @@ function showDraftsModal(drafts) {
   openModal('draftsModal');
 }
 function closeDraftsModal() { closeModal('draftsModal'); }
-
 async function restoreDraft(sessionId) {
   if (state.cart.length > 0) {
     if (!confirm(`Giỏ hiện tại có ${state.cart.length} dòng.\n\nKhôi phục nháp sẽ THAY THẾ toàn bộ.\nTiếp tục?`)) return;
@@ -649,7 +650,6 @@ async function restoreDraft(sessionId) {
     const data = await res.json();
     if (!data.ok) { toast('Lỗi: ' + data.error, 'error'); return; }
     if (!data.items || !data.items.length) { toast('Nháp rỗng', 'warn'); return; }
-
     state.cart = data.items.map(x => ({
       itemCode: x.itemCode, itemName: x.itemName,
       barcode: x.barcode || '', numInSale: Number(x.numInSale) || 1,
@@ -663,6 +663,7 @@ async function restoreDraft(sessionId) {
     state.isDirty = false;
     state.lastSavedAt = new Date().toISOString();
     state.finalSubmitted = false;
+    lastSavedHash = cartHash();
     saveSession(); renderCart(); renderSessionStatus(); renderDistHeader();
     toast(`✅ Đã khôi phục ${state.cart.length} dòng`, 'success');
   } catch(e) { toast('Lỗi khôi phục: ' + e.message, 'error'); }
@@ -678,12 +679,7 @@ async function openScanner() {
   $('#scanError').classList.add('hidden');
   $('#flashBtn').classList.add('hidden');
   scanEngine = hasNativeDetector() ? 'native' : 'html5';
-  console.log('[Scanner] Engine:', scanEngine);
-
-  if (scanEngine === 'html5') {
-    await startHtml5Scanner();
-    return;
-  }
+  if (scanEngine === 'html5') { await startHtml5Scanner(); return; }
   try {
     const reader = $('#reader');
     reader.innerHTML = '<video id="scanVideo" autoplay playsinline muted style="width:100%;height:auto;border-radius:12px;"></video>';
@@ -706,7 +702,6 @@ async function openScanner() {
     showScanError(msg, hint);
   }
 }
-
 async function startNativeScanner() {
   const wanted = ['ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','codabar','itf','qr_code','data_matrix','pdf417','aztec'];
   let supported = wanted.slice();
@@ -730,15 +725,10 @@ async function startNativeScanner() {
   };
   scanRAF = requestAnimationFrame(scanLoop);
 }
-
 async function startHtml5Scanner() {
-  if (!window.Html5Qrcode) {
-    showScanError('Không tải được thư viện quét', 'Kiểm tra mạng và thử lại.');
-    return;
-  }
+  if (!window.Html5Qrcode) { showScanError('Không tải được thư viện quét', 'Kiểm tra mạng và thử lại.'); return; }
   const reader = $('#reader');
   reader.innerHTML = '';
-
   try {
     html5Scanner = new Html5Qrcode('reader', { verbose: false });
     const config = {
@@ -751,7 +741,6 @@ async function startHtml5Scanner() {
       aspectRatio: 1.0,
       experimentalFeatures: { useBarCodeDetectorIfSupported: false }
     };
-
     await html5Scanner.start(
       { facingMode: 'environment' },
       config,
@@ -765,8 +754,6 @@ async function startHtml5Scanner() {
       },
       () => {}
     );
-    console.log('[html5-qrcode] Started');
-
     try {
       const track = html5Scanner.getRunningTrackCameraCapabilities();
       if (track && track.torchFeature && track.torchFeature().isSupported()) {
@@ -783,7 +770,6 @@ async function startHtml5Scanner() {
     showScanError(msg, hint);
   }
 }
-
 async function closeScanner() {
   scanEngine = null;
   if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
@@ -798,7 +784,6 @@ async function closeScanner() {
   $('#scanError').classList.add('hidden');
   closeModal('scanModal');
 }
-
 async function toggleTorch() {
   try {
     if (html5Scanner) {
@@ -821,13 +806,11 @@ async function toggleTorch() {
     $('#flashBtn').classList.toggle('text-black', state.torchOn);
   } catch(e) { toast('Không bật được đèn','error'); }
 }
-
 function showScanError(msg, hint) {
   $('#scanErrorMsg').textContent = msg;
   const hintEl = $('#scanErrorHint'); if (hintEl) hintEl.textContent = hint || '';
   $('#scanError').classList.remove('hidden'); $('#flashBtn').classList.add('hidden');
 }
-
 function onBarcodeDetected(code) {
   const found = findItemByScanCode(code);
   if (!found) {
@@ -878,7 +861,7 @@ function pickSearchResult(code) {
   toastLong(`🔍 → ${item.name}`, 'success'); closeSearch(); openQtyModal(item);
 }
 
-// ============ ITEM CODE MODAL ============
+// ============ ITEM CODE MANUAL ============
 function openItemCodeModal(prefillCode, codeType) {
   openModal('itemCodeModal');
   $('#itemCodeInput').value = prefillCode || '';
@@ -1176,8 +1159,8 @@ function renderCart() {
         <div class="font-bold text-blue-700 text-base leading-tight">${fmt(x.total)}</div>
         <div class="text-[9px] text-slate-400">${x.uom||'sp'}</div>
         <div class="flex gap-2 mt-1">
-          <button onclick="editCartItem(${i})" class="text-blue-600 text-[14px] p-0.5" aria-label="Sửa">✏️</button>
-          <button onclick="removeCart(${i})" class="text-red-500 text-[14px] p-0.5" aria-label="Xóa">✕</button>
+          <button onclick="editCartItem(${i})" class="text-blue-600 text-[14px] p-0.5">✏️</button>
+          <button onclick="removeCart(${i})" class="text-red-500 text-[14px] p-0.5">✕</button>
         </div>
       </div></div>`;
   }).join('');
@@ -1199,47 +1182,111 @@ function updateSummary() {
   $('#sumQty').textContent = fmt(totalQty);
 }
 
-// ============ SAVE DRAFT ============
+// ============ SAFE AUTO-SAVE ============
+function cartHash() {
+  if (!state.cart || !state.cart.length) return '';
+  return JSON.stringify(state.cart.map(x => [
+    x.itemCode, x.cases, x.packs, x.total,
+    x.prodDate, x.prodLine, x.prodShift, x.packMachine
+  ]));
+}
+function updateSaveIndicator(status) {
+  const el = $('#autoSaveIndicator');
+  if (!el) return;
+  const map = {
+    saving: { text: '⏳ Đang lưu...', cls: 'text-blue-600' },
+    saved:  { text: '✅ Đã lưu',    cls: 'text-green-600' },
+    error:  { text: '⚠️ Lỗi lưu',   cls: 'text-red-600' },
+    idle:   { text: '',              cls: '' }
+  };
+  const v = map[status] || map.idle;
+  el.textContent = v.text;
+  el.className = 'text-[9px] ml-1 ' + v.cls;
+}
+async function safeAutoSave(reason) {
+  if (autoSaveInProgress) return;
+  if (!state.cart.length) return;
+  if (!state.currentUser) return;
+  if (state.finalSubmitted) return;
+  if (state.savedStatus === 'final') return;
+
+  const hash = cartHash();
+  if (hash === lastSavedHash && reason !== 'force' && reason !== 'manual') return;
+
+  autoSaveInProgress = true;
+  updateSaveIndicator('saving');
+  const oldDirty = state.isDirty;
+
+  try {
+    // 1. Local backup ngay lập tức
+    saveSession();
+
+    // 2. Server save
+    const payload = {
+      action: 'save-draft',
+      distributor: state.currentDistributor,
+      user: Object.assign({}, state.currentUser, { phone: formatPhoneVN(state.currentUser.phone) }),
+      sessionId: state.sessionId,
+      location: state.location,
+      items: state.cart
+    };
+    const payloadStr = JSON.stringify(payload);
+
+    if (!navigator.onLine) {
+      const queue = getOfflineQueue();
+      queue.push({ id: Date.now() + Math.random(), payload: payloadStr });
+      setOfflineQueue(queue);
+      console.log('[AutoSave] Offline — queued (' + reason + ')');
+      updateSaveIndicator('saved');
+    } else {
+      await fetch(CONFIG.APPS_SCRIPT_URL, {
+        method: 'POST', mode: 'no-cors',
+        headers: {'Content-Type': 'text/plain;charset=utf-8'},
+        body: payloadStr
+      });
+      console.log('[AutoSave] ✅ Server saved (' + reason + ')');
+      updateSaveIndicator('saved');
+    }
+
+    state.isDirty = false;
+    state.savedStatus = 'draft';
+    state.lastSavedAt = new Date().toISOString();
+    lastSavedHash = hash;
+    saveSession();
+    renderSessionStatus();
+
+    setTimeout(() => updateSaveIndicator('idle'), 2000);
+
+    if (reason === 'manual') toast('💾 Đã lưu nháp', 'success');
+
+  } catch(e) {
+    console.warn('[AutoSave] ❌ Failed:', e.message);
+    state.isDirty = oldDirty;
+    updateSaveIndicator('error');
+    try {
+      const queue = getOfflineQueue();
+      const payload = {
+        action: 'save-draft',
+        distributor: state.currentDistributor,
+        user: Object.assign({}, state.currentUser, { phone: formatPhoneVN(state.currentUser.phone) }),
+        sessionId: state.sessionId,
+        location: state.location,
+        items: state.cart
+      };
+      queue.push({ id: Date.now() + Math.random(), payload: JSON.stringify(payload) });
+      setOfflineQueue(queue);
+    } catch(_) {}
+    if (reason === 'manual') toast('⚠️ Lỗi mạng — đã xếp hàng đợi', 'warn');
+  } finally {
+    autoSaveInProgress = false;
+  }
+}
 async function saveDraft() {
   if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
   if (!state.currentUser) return toast('Thiếu thông tin người thực hiện', 'error');
   if (state.finalSubmitted) return toast('Phiên đã gửi chính thức', 'warn');
-
-  const payload = {
-    action: 'save-draft',
-    distributor: state.currentDistributor,
-    user: Object.assign({}, state.currentUser, { phone: formatPhoneVN(state.currentUser.phone) }),
-    sessionId: state.sessionId,
-    location: state.location,
-    items: state.cart
-  };
-  const payloadStr = JSON.stringify(payload);
-
-  if (!navigator.onLine) {
-    const queue = getOfflineQueue();
-    queue.push({ id: Date.now() + Math.random(), payload: payloadStr });
-    setOfflineQueue(queue);
-    toast('Offline: hàng đợi chờ gửi', 'warn');
-    return;
-  }
-
-  try {
-    await fetch(CONFIG.APPS_SCRIPT_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: payloadStr
-    });
-    state.isDirty = false;
-    state.savedStatus = 'draft';
-    state.lastSavedAt = new Date().toISOString();
-    saveSession(); renderSessionStatus();
-    toast('💾 Đã lưu nháp', 'success');
-  } catch(e) {
-    const queue = getOfflineQueue();
-    queue.push({ id: Date.now() + Math.random(), payload: payloadStr });
-    setOfflineQueue(queue);
-    toast('Lỗi — đã lưu vào hàng đợi', 'warn');
-  }
+  lastSavedHash = '';
+  await safeAutoSave('manual');
 }
 
 // ============ SUBMIT FINAL ============
@@ -1291,6 +1338,7 @@ async function submitFinal() {
       state.finalSubmitted = false;
       state.isDirty = false;
       state.recentScans = {};
+      lastSavedHash = '';
       saveSession(); renderCart(); renderSessionStatus(); renderDistHeader();
       toast('Đã bắt đầu phiên mới', 'success');
     }, 2200);
@@ -1299,18 +1347,62 @@ async function submitFinal() {
   }
 }
 
-// ============ AUTO-SAVE ============
+// ============ AUTO-SAVE INTERVALS + EVENTS ============
+// Interval: 15s
 setInterval(() => {
   if (!state.autoSaveEnabled) return;
-  if (isAnyModalOpen()) return;
   if (!state.isDirty) return;
-  if (!state.cart.length) return;
-  if (!state.currentUser) return;
-  if (state.finalSubmitted) return;
-  if (!navigator.onLine) return;
-  console.log('[AutoSave] Saving draft...');
-  saveDraft().catch(e => console.warn('AutoSave failed:', e));
-}, CONFIG.AUTOSAVE_SEC * 1000);
+  safeAutoSave('interval');
+}, CONFIG.AUTOSAVE_INTERVAL_SEC * 1000);
+
+// Visibility change
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    safeAutoSave('visibility-hidden');
+  } else if (document.visibilityState === 'visible') {
+    if (state.isDirty) setTimeout(() => safeAutoSave('visibility-visible'), 500);
+  }
+});
+
+// Before unload
+window.addEventListener('beforeunload', () => {
+  try {
+    saveSession();
+    if (state.isDirty && state.cart.length && navigator.onLine) {
+      const payload = {
+        action: 'save-draft',
+        distributor: state.currentDistributor,
+        user: Object.assign({}, state.currentUser, { phone: formatPhoneVN(state.currentUser.phone) }),
+        sessionId: state.sessionId,
+        location: state.location,
+        items: state.cart
+      };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'text/plain;charset=utf-8' });
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(CONFIG.APPS_SCRIPT_URL, blob);
+      }
+    }
+  } catch(_) {}
+});
+
+// Pagehide (iOS)
+window.addEventListener('pagehide', () => {
+  try {
+    saveSession();
+    if (state.isDirty && state.cart.length && navigator.onLine && navigator.sendBeacon) {
+      const payload = {
+        action: 'save-draft',
+        distributor: state.currentDistributor,
+        user: Object.assign({}, state.currentUser, { phone: formatPhoneVN(state.currentUser.phone) }),
+        sessionId: state.sessionId,
+        location: state.location,
+        items: state.cart
+      };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'text/plain;charset=utf-8' });
+      navigator.sendBeacon(CONFIG.APPS_SCRIPT_URL, blob);
+    }
+  } catch(_) {}
+});
 
 // ============ EXPORT CSV ============
 function exportCSV() {
@@ -1342,12 +1434,10 @@ function exportCSV() {
 
 // ============ BIND ============
 window.addEventListener('DOMContentLoaded', () => {
-  // Login form
   $('#loginBtn').onclick = doLogin;
   $('#loginInput').addEventListener('keydown', e => e.key==='Enter' && doLogin());
   $('#loginUser').addEventListener('keydown', e => e.key==='Enter' && doLogin());
 
-  // Auto-format SĐT VN
   const phoneInput = $('#loginPhone');
   phoneInput.addEventListener('input', (e) => {
     const el = e.target;
@@ -1367,7 +1457,6 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') { e.preventDefault(); doLogin(); }
   });
 
-  // Main screen
   $('#logoutBtn').onclick = logout;
   $('#headerToggleBtn').onclick = toggleHeader;
   $('#reloadBtn').onclick = () => { if (confirm('Tải lại dữ liệu? (Xóa cache)')) clearSheetCache(); };
@@ -1380,7 +1469,6 @@ window.addEventListener('DOMContentLoaded', () => {
     state.location.supplement = e.target.value.trim();
     renderLocationFull();
     markDirty();
-    saveSession();
   });
   $('#closeLocationGuideBtn').onclick = closeLocationGuide;
   $('#closeLocationGuideBtn2').onclick = closeLocationGuide;
@@ -1436,31 +1524,26 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="w-16 h-16 mx-auto bg-blue-100 rounded-full items-center justify-center text-3xl" style="display:none;">📦</div>
       <h1 class="text-xl font-bold text-slate-800 mt-3">Kiểm kê Nhà phân phối</h1>
     </div>
-
     <div class="mb-3">
       <label class="text-xs font-semibold text-slate-600">Mã nhà phân phối <span class="text-red-500">*</span></label>
       <input id="loginInput" type="text" autocomplete="off" placeholder="VD: 50000017, NPP001, Bà Tư..."
         class="w-full border border-slate-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     </div>
-
     <div class="mb-3">
       <label class="text-xs font-semibold text-slate-600">Tên nhân viên thực hiện <span class="text-red-500">*</span></label>
       <input id="loginUser" type="text" autocomplete="name" placeholder="VD: Nguyễn Văn A"
         class="w-full border border-slate-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     </div>
-
     <div class="mb-3">
       <label class="text-xs font-semibold text-slate-600">Số điện thoại <span class="text-red-500">*</span></label>
       <input id="loginPhone" type="tel" inputmode="numeric" maxlength="12" autocomplete="tel"
         placeholder="VD: 0912 345 678"
         class="w-full border border-slate-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     </div>
-
     <label class="flex items-center gap-2 mb-4 cursor-pointer select-none p-2 -m-2 rounded-lg hover:bg-slate-50 active:bg-slate-100">
       <input id="rememberMe" type="checkbox" class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
       <span class="text-sm text-slate-600">Ghi nhớ cho lần đăng nhập sau</span>
     </label>
-
     <button id="loginBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Đăng nhập</button>
     <button id="installBtn" class="hidden w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded-xl mt-3 text-sm">📲 Cài đặt app lên màn hình chính</button>
   </div>
@@ -1471,7 +1554,7 @@ window.addEventListener('DOMContentLoaded', () => {
   <header id="mainHeader" class="bg-blue-700 text-white sticky top-0 z-30 shadow-md">
     <div class="max-w-2xl mx-auto px-3">
       <div class="flex items-center gap-2 py-2">
-        <button id="headerToggleBtn" class="text-sm flex-shrink-0 w-6 h-6 flex items-center justify-center rounded bg-blue-800/60 transition-transform duration-200" aria-label="Mở rộng">▾</button>
+        <button id="headerToggleBtn" class="text-sm flex-shrink-0 w-6 h-6 flex items-center justify-center rounded bg-blue-800/60 transition-transform duration-200">▾</button>
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-1.5 min-w-0">
             <span id="distCodeCompact" class="font-mono text-[11px] opacity-80 flex-shrink-0"></span>
@@ -1480,7 +1563,6 @@ window.addEventListener('DOMContentLoaded', () => {
         </div>
         <button id="logoutBtn" class="text-[10px] bg-blue-800/60 hover:bg-blue-900 px-2 py-1 rounded whitespace-nowrap">Thoát</button>
       </div>
-
       <div id="headerExpanded" class="header-expand">
         <div class="pb-2.5 border-t border-blue-600/40 pt-2 space-y-1.5">
           <div id="distName" class="font-semibold text-[12px] truncate"></div>
@@ -1489,7 +1571,10 @@ window.addEventListener('DOMContentLoaded', () => {
             <span id="userInfo" class="truncate"></span>
             <span id="sessionInfo" class="font-mono opacity-70 truncate flex-shrink-0"></span>
           </div>
-          <div id="sessionStatus" class="text-[11px] flex items-center"></div>
+          <div class="flex items-center justify-between gap-2">
+            <div id="sessionStatus" class="text-[11px] flex items-center"></div>
+            <span id="autoSaveIndicator" class="text-[9px]"></span>
+          </div>
           <div class="flex items-center gap-1.5 pt-1 flex-wrap">
             <button id="reloadBtn" class="text-[10px] bg-blue-800/60 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải</button>
             <button id="continuousBtn" class="text-[10px] px-2 py-1 rounded font-semibold">🔁 Liên tục</button>
@@ -1531,7 +1616,6 @@ window.addEventListener('DOMContentLoaded', () => {
           <span>Lấy vị trí</span>
         </label>
       </div>
-
       <div id="locSupplementWrap" class="hidden mt-2 pt-2 border-t border-slate-200">
         <label class="text-[11px] font-semibold text-slate-600 flex items-center gap-1">
           <span>🏠</span> Số nhà / Tên đường
