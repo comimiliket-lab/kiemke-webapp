@@ -4,7 +4,6 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Kiểm kê Nhà phân phối</title>
-
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="./icon.png" type="image/png" />
 <link rel="apple-touch-icon" href="./icon.png" />
@@ -13,7 +12,6 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="KiemKe" />
 <meta name="mobile-web-app-capable" content="yes" />
-
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
@@ -36,6 +34,10 @@
   .badge-type { display:inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
   .badge-barcode { background:#dbeafe; color:#1e40af; }
   .badge-poscs { background:#fce7f3; color:#be185d; }
+  .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+  .dot-dirty { background:#f59e0b; animation: pulse 1.5s infinite; }
+  .dot-saved { background:#10b981; }
+  .dot-final { background:#3b82f6; }
 </style>
 </head>
 <body class="bg-slate-100 min-h-screen font-sans">
@@ -45,19 +47,16 @@
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./service-worker.js')
-      .then(reg => console.log('[PWA] SW registered:', reg.scope))
-      .catch(err => console.warn('[PWA] SW error:', err));
+      .then(reg => console.log('[PWA] SW:', reg.scope))
+      .catch(err => console.warn('[PWA] SW err:', err));
   });
 }
-
 let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  deferredPrompt = e;
+  e.preventDefault(); deferredPrompt = e;
   const btn = document.getElementById('installBtn');
   if (btn) btn.classList.remove('hidden');
 });
-
 async function installPWA() {
   if (!deferredPrompt) { toast('Đã cài hoặc chưa hỗ trợ', 'info'); return; }
   deferredPrompt.prompt();
@@ -76,16 +75,16 @@ const CONFIG = {
   COLS: {
     DIST_CODE: 'DistributorCode', DIST_NAME: 'DistributorName', DIST_ALIAS: 'CustomerReference',
     ITEM_CODE: 'ItemCode', ITEM_NAME: 'ItemName', ITEM_FRGN: 'FrgnName',
-    ITEM_BARCODE: 'CodeBars',
-    ITEM_POSCSCODE: 'U_POSCSCode',
+    ITEM_BARCODE: 'CodeBars', ITEM_POSCSCODE: 'U_POSCSCode',
     ITEM_NUMINSALE: 'NumInSale', ITEM_UOM: 'SalUnitMsr', ITEM_GROUP: 'ItmsGrpCod'
   },
-  PROD_LINES:  ['Line 6', 'Line 7', 'Line 8', 'Line CL', 'Orther'],
-  PROD_SHIFTS: ['Ca A6', 'Ca B6', 'Ca A7', 'Ca B7', 'Ca A8', 'Ca B8', 'Orther'],
-  PACK_MACHINES: ['Máy 1', 'Máy 2', 'Máy 3', 'Máy 4', 'Máy 5'],
+  PROD_LINES:  ['Line 6','Line 7','Line 8','Line CL','Orther'],
+  PROD_SHIFTS: ['Ca A6','Ca B6','Ca A7','Ca B7','Ca A8','Ca B8','Orther'],
+  PACK_MACHINES: ['Máy 1','Máy 2','Máy 3','Máy 4','Máy 5'],
   OTHER_VALUE: 'Orther',
-  DEFAULT_LINE: '', DEFAULT_SHIFT: '', DEFAULT_MACHINE: '',
+  DEFAULT_LINE:'', DEFAULT_SHIFT:'', DEFAULT_MACHINE:'',
   DUP_WINDOW_MIN: 5,
+  AUTOSAVE_SEC: 30,
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwo-P3P79v9ZgSuM3tJVlNOMlfBmEDWH6bNFRK8_CYG6ION-1xtO_KlgKk2MeOk5GVf/exec'
 };
 
@@ -94,23 +93,29 @@ const gvizURL = (sheet) =>
 
 const state = {
   distributors: [], distributorIndex: new Map(),
-  items: [],
-  itemByBarcode: new Map(),
-  itemByPosCsCode: new Map(),
-  itemByCode: new Map(),
+  items: [], itemByBarcode: new Map(), itemByPosCsCode: new Map(), itemByCode: new Map(),
   currentDistributor: null, currentUser: null, sessionId: null, cart: [],
   editingIndex: null,
-  location: { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null },
+  location: { enabled:false, lat:null, lng:null, address:'', accuracy:null, ts:null },
   defaults: { line: CONFIG.DEFAULT_LINE, shift: CONFIG.DEFAULT_SHIFT, machine: CONFIG.DEFAULT_MACHINE },
-  recentScans: {},
-  lastRow: null,
+  recentScans: {}, lastRow: null,
   continuousMode: localStorage.getItem('kks_continuous') === 'true',
-  torchOn: false
+  torchOn: false,
+  isDirty: false,
+  savedStatus: 'none',           // 'none' | 'draft' | 'final'
+  lastSavedAt: null,
+  autoSaveEnabled: localStorage.getItem('kks_autosave') !== 'false',
+  finalSubmitted: false
 };
 
-const $  = (s) => document.querySelector(s);
+const $ = (s) => document.querySelector(s);
 const fmt = (n) => Number(n||0).toLocaleString('vi-VN');
 const todayISO = () => new Date().toISOString().slice(0,10);
+const timeShort = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString('vi-VN', { hour:'2-digit', minute:'2-digit' });
+};
 const toast = (msg, type='info') => {
   const el = document.createElement('div');
   const color = type==='error'?'bg-red-500':type==='success'?'bg-green-600':type==='warn'?'bg-amber-500':'bg-slate-800';
@@ -127,8 +132,7 @@ const toastLong = (msg, type='info', duration=3500) => {
   document.body.appendChild(el);
   setTimeout(()=>el.remove(), duration);
 };
-const normalize = (s) => (s||'').toString().trim().toLowerCase()
-  .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
+const normalize = (s) => (s||'').toString().trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
 const normKey = (s) => (s||'').toString().trim().toUpperCase();
 const cartKey = (x) => [x.itemCode, x.prodDate||'', x.prodLine||'', x.prodShift||'', x.packMachine||''].join('|');
 const genSessionId = () => {
@@ -141,219 +145,141 @@ const genSessionId = () => {
 
 function findItemByScanCode(code) {
   const k = normKey(code);
-  if (state.itemByBarcode.has(k)) return { item: state.itemByBarcode.get(k), type: 'barcode' };
-  if (state.itemByPosCsCode.has(k)) return { item: state.itemByPosCsCode.get(k), type: 'poscs' };
+  if (state.itemByBarcode.has(k)) return { item: state.itemByBarcode.get(k), type:'barcode' };
+  if (state.itemByPosCsCode.has(k)) return { item: state.itemByPosCsCode.get(k), type:'poscs' };
   return null;
 }
+function markDirty() { state.isDirty = true; renderSessionStatus(); }
 
-// ============ ĐỊNH VỊ GPS ============
-function setLocStatus(text, color = 'text-slate-500') {
-  const el = $('#locStatus');
-  if (el) {
-    el.className = 'text-xs mt-1 ' + color;
-    el.textContent = text;
-  }
+// ============ GPS ============
+function setLocStatus(text, color='text-slate-500') {
+  const el = $('#locStatus'); if (el) { el.className = 'text-xs mt-1 ' + color; el.textContent = text; }
 }
-
 async function fetchLocation() {
   if (!('geolocation' in navigator)) {
     setLocStatus('❌ Thiết bị không hỗ trợ GPS', 'text-red-600');
     toast('Thiết bị không hỗ trợ định vị', 'error');
-    state.location.enabled = false;
-    $('#locEnable').checked = false;
-    return;
+    state.location.enabled = false; $('#locEnable').checked = false; return;
   }
-
   setLocStatus('⏳ Đang lấy vị trí...', 'text-blue-600');
-  const $addr = $('#locAddress');
-  const $coords = $('#locCoords');
-  $addr.classList.add('hidden');
-  $coords.classList.add('hidden');
+  $('#locAddress').classList.add('hidden'); $('#locCoords').classList.add('hidden');
 
   navigator.geolocation.getCurrentPosition(
     async (pos) => {
-      const lat = pos.coords.latitude;
-      const lng = pos.coords.longitude;
-      const acc = Math.round(pos.coords.accuracy);
-
-      state.location.lat = lat;
-      state.location.lng = lng;
-      state.location.accuracy = acc;
+      const lat = pos.coords.latitude, lng = pos.coords.longitude, acc = Math.round(pos.coords.accuracy);
+      state.location.lat = lat; state.location.lng = lng; state.location.accuracy = acc;
       state.location.ts = new Date().toISOString();
-
-      $coords.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} (±${acc}m)`;
-      $coords.classList.remove('hidden');
-      setLocStatus('✅ Đã lấy tọa độ, đang tra địa chỉ...', 'text-blue-600');
-
+      $('#locCoords').textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} (±${acc}m)`;
+      $('#locCoords').classList.remove('hidden');
+      setLocStatus('✅ Đang tra địa chỉ...', 'text-blue-600');
       try {
         const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=vi`;
-        const res = await fetch(url);
-        const data = await res.json();
-
-        const parts = [
-          data.locality || data.city,
-          data.principalSubdivision,
-          data.countryName
-        ].filter(Boolean);
-        const addr = parts.join(', ') || '(không tra được địa chỉ)';
-
+        const res = await fetch(url); const data = await res.json();
+        const parts = [data.locality || data.city, data.principalSubdivision, data.countryName].filter(Boolean);
+        const addr = parts.join(', ') || `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
         state.location.address = addr;
-        $addr.textContent = '📍 ' + addr;
-        $addr.classList.remove('hidden');
+        $('#locAddress').textContent = '📍 ' + addr;
+        $('#locAddress').classList.remove('hidden');
         setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
-        toast('Đã lấy vị trí: ' + addr, 'success');
-
-      } catch (err) {
-        console.error('Reverse geocode error:', err);
+      } catch(_) {
         state.location.address = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-        $addr.textContent = '📍 ' + state.location.address;
-        $addr.classList.remove('hidden');
-        setLocStatus('✅ Đã lấy tọa độ (không tra được địa chỉ)', 'text-amber-600');
+        $('#locAddress').textContent = '📍 ' + state.location.address;
+        $('#locAddress').classList.remove('hidden');
+        setLocStatus('✅ Đã lấy tọa độ', 'text-amber-600');
       }
-
-      saveSession();
+      markDirty(); saveSession();
     },
     (err) => {
-      console.error('Geolocation error:', err);
       let msg = '❌ Không lấy được vị trí';
-      if (err.code === 1) msg = '❌ Bạn chưa cho phép truy cập vị trí';
+      if (err.code === 1) msg = '❌ Chưa cho phép truy cập vị trí';
       else if (err.code === 2) msg = '❌ Không xác định được vị trí';
       else if (err.code === 3) msg = '❌ Quá thời gian lấy vị trí';
-      setLocStatus(msg, 'text-red-600');
-      toast(msg, 'error');
-      state.location.enabled = false;
-      $('#locEnable').checked = false;
+      setLocStatus(msg, 'text-red-600'); toast(msg, 'error');
+      state.location.enabled = false; $('#locEnable').checked = false;
     },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    { enableHighAccuracy:true, timeout:15000, maximumAge:60000 }
   );
 }
-
 function toggleLocation() {
   const on = $('#locEnable').checked;
   state.location.enabled = on;
-  if (on) {
-    fetchLocation();
-  } else {
-    state.location.lat = null;
-    state.location.lng = null;
-    state.location.address = '';
-    state.location.accuracy = null;
-    state.location.ts = null;
+  if (on) fetchLocation();
+  else {
+    Object.assign(state.location, { lat:null, lng:null, address:'', accuracy:null, ts:null });
     setLocStatus('Chưa lấy vị trí', 'text-slate-500');
-    $('#locAddress').classList.add('hidden');
-    $('#locCoords').classList.add('hidden');
+    $('#locAddress').classList.add('hidden'); $('#locCoords').classList.add('hidden');
     saveSession();
   }
 }
-
 function renderLocation() {
   const L = state.location;
-  const chk = $('#locEnable');
-  if (chk) chk.checked = L.enabled;
+  const chk = $('#locEnable'); if (chk) chk.checked = L.enabled;
   if (L.lat && L.lng) {
     $('#locCoords').textContent = `${L.lat.toFixed(6)}, ${L.lng.toFixed(6)}${L.accuracy ? ' (±'+L.accuracy+'m)' : ''}`;
     $('#locCoords').classList.remove('hidden');
-    if (L.address) {
-      $('#locAddress').textContent = '📍 ' + L.address;
-      $('#locAddress').classList.remove('hidden');
-    }
+    if (L.address) { $('#locAddress').textContent = '📍 ' + L.address; $('#locAddress').classList.remove('hidden'); }
     setLocStatus('✅ Đã lấy vị trí', 'text-green-600');
   }
 }
 
 // ============ OFFLINE QUEUE ============
-function getOfflineQueue() {
-  try { return JSON.parse(localStorage.getItem('kks_offline_queue') || '[]'); } catch(_) { return []; }
-}
-function setOfflineQueue(q) {
-  localStorage.setItem('kks_offline_queue', JSON.stringify(q));
-  updateOfflineBadge();
-}
+function getOfflineQueue() { try { return JSON.parse(localStorage.getItem('kks_offline_queue') || '[]'); } catch(_) { return []; } }
+function setOfflineQueue(q) { localStorage.setItem('kks_offline_queue', JSON.stringify(q)); updateOfflineBadge(); }
 function updateOfflineBadge() {
-  const q = getOfflineQueue();
-  const badge = document.getElementById('offlineBadge');
-  if (!badge) return;
-  if (q.length > 0) {
-    badge.classList.remove('hidden');
-    badge.textContent = `📤 ${q.length} chờ gửi`;
-  } else {
-    badge.classList.add('hidden');
-  }
+  const q = getOfflineQueue(); const badge = document.getElementById('offlineBadge'); if (!badge) return;
+  if (q.length > 0) { badge.classList.remove('hidden'); badge.textContent = `📤 ${q.length} chờ gửi`; }
+  else badge.classList.add('hidden');
 }
 async function flushOfflineQueue() {
-  const queue = getOfflineQueue();
-  if (!queue.length) return;
+  const queue = getOfflineQueue(); if (!queue.length) return;
   let sent = 0;
   for (const item of queue) {
     try {
       await fetch(CONFIG.APPS_SCRIPT_URL, {
-        method: 'POST', mode: 'no-cors',
-        headers: {'Content-Type':'text/plain;charset=utf-8'},
+        method:'POST', mode:'no-cors',
+        headers:{'Content-Type':'text/plain;charset=utf-8'},
         body: item.payload
       });
       sent++;
-      const remaining = getOfflineQueue().filter(q => q.id !== item.id);
-      setOfflineQueue(remaining);
+      setOfflineQueue(getOfflineQueue().filter(q => q.id !== item.id));
     } catch(e) { break; }
   }
-  if (sent > 0) toast(`Đã gửi ${sent} phiên offline`, 'success');
+  if (sent > 0) toast(`Đã gửi ${sent} hàng đợi`, 'success');
 }
-window.addEventListener('online', () => {
-  toast('Đã có mạng — đang gửi hàng đợi...', 'success');
-  flushOfflineQueue();
-});
-window.addEventListener('offline', () => toast('Mất mạng — dữ liệu sẽ lưu vào hàng đợi', 'warn'));
+window.addEventListener('online', () => { toast('Đã có mạng', 'success'); flushOfflineQueue(); });
+window.addEventListener('offline', () => toast('Mất mạng — lưu offline', 'warn'));
 
 // ============ LOAD DATA ============
 async function loadSheet(name) {
   const cacheKey = `kks_cache_${name}`;
   const cached = localStorage.getItem(cacheKey);
-  if (cached) {
-    try {
-      const { data, ts } = JSON.parse(cached);
-      if ((Date.now() - ts) / 60000 < CONFIG.CACHE_TTL_MIN) return data;
-    } catch(_) {}
-  }
+  if (cached) { try { const { data, ts } = JSON.parse(cached); if ((Date.now() - ts)/60000 < CONFIG.CACHE_TTL_MIN) return data; } catch(_) {} }
   const data = await new Promise((resolve, reject) => {
-    Papa.parse(gvizURL(name), {
-      download: true, header: true, skipEmptyLines: true,
-      complete: (res) => resolve(res.data), error: reject
-    });
+    Papa.parse(gvizURL(name), { download:true, header:true, skipEmptyLines:true, complete: res => resolve(res.data), error: reject });
   });
   try { localStorage.setItem(cacheKey, JSON.stringify({ data, ts: Date.now() })); } catch(_) {}
   return data;
 }
-
 function clearSheetCache() {
   localStorage.removeItem(`kks_cache_${CONFIG.SHEETS.SO90}`);
   localStorage.removeItem(`kks_cache_${CONFIG.SHEETS.ITEMS}`);
   toast('Đã xóa cache. Đang tải lại...', 'info');
   setTimeout(() => location.reload(), 800);
 }
-
 function showCacheAge() {
   const cached = localStorage.getItem(`kks_cache_${CONFIG.SHEETS.ITEMS}`);
-  if (cached) {
-    try {
-      const { ts } = JSON.parse(cached);
-      const ageMin = Math.floor((Date.now() - ts) / 60000);
-      const el = document.getElementById('cacheInfo');
-      if (el) el.textContent = ageMin < 1 ? '(vừa tải)' : `(cache ${ageMin}p)`;
-    } catch(_) {}
-  }
+  if (cached) { try { const { ts } = JSON.parse(cached); const ageMin = Math.floor((Date.now() - ts)/60000);
+    const el = document.getElementById('cacheInfo'); if (el) el.textContent = ageMin < 1 ? '(vừa tải)' : `(cache ${ageMin}p)`; } catch(_) {} }
 }
 
 async function boot() {
   try {
     showScreen('loading');
-    const [so90, items] = await Promise.all([
-      loadSheet(CONFIG.SHEETS.SO90), loadSheet(CONFIG.SHEETS.ITEMS)
-    ]);
+    const [so90, items] = await Promise.all([ loadSheet(CONFIG.SHEETS.SO90), loadSheet(CONFIG.SHEETS.ITEMS) ]);
 
     const dMap = new Map();
     so90.forEach(r => {
-      const code = (r[CONFIG.COLS.DIST_CODE]||'').trim();
-      if (!code) return;
+      const code = (r[CONFIG.COLS.DIST_CODE]||'').trim(); if (!code) return;
       const name = (r[CONFIG.COLS.DIST_NAME]||'').trim();
       const alias = (r[CONFIG.COLS.DIST_ALIAS]||'').trim();
       if (!dMap.has(code)) dMap.set(code, { code, name, aliases: new Set() });
@@ -367,48 +293,29 @@ async function boot() {
     state.distributors.forEach(d => {
       state.distributorIndex.set(normKey(d.code), d);
       if (d.name) state.distributorIndex.set(normKey(d.name), d);
-      d.aliases.forEach(a => {
-        if (!state.distributorIndex.has(normKey(a))) state.distributorIndex.set(normKey(a), d);
-      });
+      d.aliases.forEach(a => { if (!state.distributorIndex.has(normKey(a))) state.distributorIndex.set(normKey(a), d); });
     });
 
     state.items = items.map(r => {
-      const code      = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
-      const barcode   = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
+      const code = (r[CONFIG.COLS.ITEM_CODE]||'').trim();
+      const barcode = (r[CONFIG.COLS.ITEM_BARCODE]||'').trim();
       const posCsCode = (r[CONFIG.COLS.ITEM_POSCSCODE]||'').trim();
-      const nis       = parseFloat(r[CONFIG.COLS.ITEM_NUMINSALE]) || 1;
+      const nis = parseFloat(r[CONFIG.COLS.ITEM_NUMINSALE]) || 1;
       return {
-        code,
-        name:  (r[CONFIG.COLS.ITEM_NAME]||'').trim(),
-        frgn:  (r[CONFIG.COLS.ITEM_FRGN]||'').trim(),
-        barcode,
-        posCsCode,
-        numInSale: nis > 0 ? nis : 1,
-        uom:   (r[CONFIG.COLS.ITEM_UOM]||'').trim(),
+        code, name: (r[CONFIG.COLS.ITEM_NAME]||'').trim(),
+        frgn: (r[CONFIG.COLS.ITEM_FRGN]||'').trim(),
+        barcode, posCsCode, numInSale: nis > 0 ? nis : 1,
+        uom: (r[CONFIG.COLS.ITEM_UOM]||'').trim(),
         group: (r[CONFIG.COLS.ITEM_GROUP]||'').trim()
       };
     }).filter(i => i.code);
 
-    state.itemByBarcode.clear();
-    state.itemByPosCsCode.clear();
-    state.itemByCode.clear();
-    let dupBarcode = 0, dupPosCs = 0;
+    state.itemByBarcode.clear(); state.itemByPosCsCode.clear(); state.itemByCode.clear();
     state.items.forEach(it => {
       state.itemByCode.set(normKey(it.code), it);
-      if (it.barcode) {
-        const k = normKey(it.barcode);
-        if (state.itemByBarcode.has(k)) dupBarcode++;
-        else state.itemByBarcode.set(k, it);
-      }
-      if (it.posCsCode) {
-        const k = normKey(it.posCsCode);
-        if (state.itemByPosCsCode.has(k)) dupPosCs++;
-        else state.itemByPosCsCode.set(k, it);
-      }
+      if (it.barcode) { const k = normKey(it.barcode); if (!state.itemByBarcode.has(k)) state.itemByBarcode.set(k, it); }
+      if (it.posCsCode) { const k = normKey(it.posCsCode); if (!state.itemByPosCsCode.has(k)) state.itemByPosCsCode.set(k, it); }
     });
-
-    if (dupBarcode > 0) console.warn('[Data] Trùng CodeBars:', dupBarcode);
-    if (dupPosCs > 0) console.warn('[Data] Trùng U_POSCSCode:', dupPosCs);
 
     const dSaved = localStorage.getItem('kks_prod_defaults');
     if (dSaved) { try { Object.assign(state.defaults, JSON.parse(dSaved)); } catch(_) {} }
@@ -421,21 +328,22 @@ async function boot() {
           state.currentDistributor = s.currentDistributor;
           state.currentUser = s.currentUser;
           state.sessionId = s.sessionId || genSessionId();
-          state.location = s.location || { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
+          state.location = s.location || state.location;
           state.cart = s.cart || [];
+          state.isDirty = s.isDirty || false;
+          state.savedStatus = s.savedStatus || 'none';
+          state.lastSavedAt = s.lastSavedAt || null;
+          state.finalSubmitted = s.finalSubmitted || false;
           showScreen('main');
-          renderDistHeader();
-          renderLocation();
-          renderCart();
+          renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
         } else showScreen('login');
       } catch(_) { showScreen('login'); }
     } else showScreen('login');
-    showCacheAge();
-    updateOfflineBadge();
-    toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU (${state.itemByBarcode.size} BC / ${state.itemByPosCsCode.size} CS)`, 'success');
+    showCacheAge(); updateOfflineBadge();
+    toast(`Đã tải ${state.distributors.length} NPP • ${state.items.length} SKU`, 'success');
   } catch (e) {
     console.error(e);
-    toast('Lỗi tải dữ liệu. Kiểm tra Publish Sheet.', 'error');
+    toast('Lỗi tải dữ liệu.', 'error');
     showScreen('login');
   }
 }
@@ -449,11 +357,10 @@ function showScreen(name) {
 
 // ============ LOGIN ============
 function doLogin() {
-  const userName  = $('#loginUser').value.trim();
+  const userName = $('#loginUser').value.trim();
   const userPhone = $('#loginPhone').value.trim();
-  const q         = $('#loginInput').value.trim();
-
-  if (!userName)  return toast('Nhập tên người thực hiện', 'error');
+  const q = $('#loginInput').value.trim();
+  if (!userName) return toast('Nhập tên người thực hiện', 'error');
   if (!userPhone) return toast('Nhập số điện thoại', 'error');
   if (!/^[0-9+\-\s()]{8,15}$/.test(userPhone)) return toast('SĐT không hợp lệ', 'error');
   if (!q) return toast('Nhập mã hoặc tên NPP', 'error');
@@ -472,21 +379,25 @@ function doLogin() {
   state.currentDistributor = found;
   state.currentUser = { name: userName, phone: userPhone };
   state.sessionId = genSessionId();
-  state.location = { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
-  state.cart = [];
-  state.recentScans = {};
+  state.location = { enabled:false, lat:null, lng:null, address:'', accuracy:null, ts:null };
+  state.cart = []; state.recentScans = {};
+  state.isDirty = false; state.savedStatus = 'none'; state.lastSavedAt = null; state.finalSubmitted = false;
   saveSession();
-  showScreen('main');
-  renderDistHeader();
-  renderLocation();
-  renderCart();
+  showScreen('main'); renderDistHeader(); renderLocation(); renderCart(); renderSessionStatus();
+  // Check drafts
+  setTimeout(() => checkDraftsOnLogin(), 500);
 }
 
 function logout() {
-  if (!confirm('Kết thúc phiên?')) return;
+  if (state.isDirty && !state.finalSubmitted) {
+    if (!confirm('Bạn có thay đổi chưa lưu.\n\nĐăng xuất sẽ mất thay đổi này.\nBạn có muốn ĐĂNG XUẤT? (Bấm Cancel để quay lại Lưu nháp)')) return;
+  } else {
+    if (!confirm('Kết thúc phiên?')) return;
+  }
   state.currentDistributor = null; state.currentUser = null; state.sessionId = null; state.cart = [];
   state.recentScans = {}; state.lastRow = null; state.editingIndex = null;
-  state.location = { enabled: false, lat: null, lng: null, address: '', accuracy: null, ts: null };
+  state.location = { enabled:false, lat:null, lng:null, address:'', accuracy:null, ts:null };
+  state.isDirty = false; state.savedStatus = 'none'; state.lastSavedAt = null; state.finalSubmitted = false;
   localStorage.removeItem('kks_session');
   showScreen('login');
   $('#loginUser').value = ''; $('#loginPhone').value = ''; $('#loginInput').value = '';
@@ -494,90 +405,138 @@ function logout() {
 
 function saveSession() {
   localStorage.setItem('kks_session', JSON.stringify({
-    currentDistributor: state.currentDistributor,
-    currentUser: state.currentUser,
-    sessionId: state.sessionId,
-    location: state.location,
-    cart: state.cart
+    currentDistributor: state.currentDistributor, currentUser: state.currentUser,
+    sessionId: state.sessionId, location: state.location, cart: state.cart,
+    isDirty: state.isDirty, savedStatus: state.savedStatus, lastSavedAt: state.lastSavedAt,
+    finalSubmitted: state.finalSubmitted
   }));
 }
-function saveProdDefaults() {
-  localStorage.setItem('kks_prod_defaults', JSON.stringify(state.defaults));
-}
+function saveProdDefaults() { localStorage.setItem('kks_prod_defaults', JSON.stringify(state.defaults)); }
 
 function renderDistHeader() {
-  const d = state.currentDistributor;
-  const u = state.currentUser || {};
+  const d = state.currentDistributor; const u = state.currentUser || {};
   const name = d.name || '(không tên)';
   const aliases = Array.from(d.aliases || []).slice(0,2).join(' • ');
-
   $('#distCodeCompact').textContent = d.code;
   $('#distNameCompact').textContent = name;
   $('#distName').textContent = name;
   $('#distAlias').textContent = aliases ? `(${aliases})` : '';
   $('#userInfo').textContent = u.name ? `👤 ${u.name} • 📞 ${u.phone}` : '';
   $('#sessionInfo').textContent = state.sessionId ? `🔑 ${state.sessionId}` : '';
-
   $('#continuousBtn').classList.toggle('bg-green-500', state.continuousMode);
   $('#continuousBtn').classList.toggle('bg-blue-800', !state.continuousMode);
+  renderSessionStatus();
 }
 
-// ============ SCANNER (Native + ZXing fallback) ============
-let scanStream = null;
-let scanRAF = null;
-let barcodeDetector = null;
-let scanVideoEl = null;
-let lastDetected = { code: '', t: 0 };
-let zxingReader = null;
-let scanEngine = null;
+function renderSessionStatus() {
+  const el = $('#sessionStatus');
+  if (!el) return;
+  if (state.finalSubmitted) {
+    el.innerHTML = `<span class="status-dot dot-final"></span><span class="font-semibold">✅ Đã gửi chính thức</span>`;
+    return;
+  }
+  if (state.isDirty) {
+    el.innerHTML = `<span class="status-dot dot-dirty"></span><span>📝 Chưa lưu thay đổi</span>`;
+    return;
+  }
+  if (state.savedStatus === 'draft' && state.lastSavedAt) {
+    el.innerHTML = `<span class="status-dot dot-saved"></span><span>💾 Đã lưu nháp ${timeShort(state.lastSavedAt)}</span>`;
+    return;
+  }
+  el.innerHTML = `<span class="status-dot" style="background:#94a3b8"></span><span>Chưa có dữ liệu</span>`;
+}
 
+// ============ CHECK DRAFTS ON LOGIN ============
+async function checkDraftsOnLogin() {
+  if (!state.currentUser) return;
+  try {
+    const u = state.currentUser;
+    const url = `${CONFIG.APPS_SCRIPT_URL}?action=list-drafts&phone=${encodeURIComponent(u.phone)}&dist=${encodeURIComponent(state.currentDistributor.code)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.ok && data.drafts && data.drafts.length > 0) {
+      showDraftsModal(data.drafts);
+    }
+  } catch(e) { console.warn('checkDrafts error:', e); }
+}
+
+function showDraftsModal(drafts) {
+  const html = drafts.map((d, i) => {
+    const ts = new Date(d.timestamp);
+    const tsStr = ts.toLocaleString('vi-VN', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+    return `
+      <button onclick="restoreDraft('${d.sessionId}')" 
+        class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100">
+        <div class="font-semibold text-slate-800 text-sm">🔑 ${d.sessionId}</div>
+        <div class="text-xs text-slate-500 mt-0.5">
+          ${tsStr} • ${d.count} dòng • ${d.distName || d.distCode}
+        </div>
+      </button>`;
+  }).join('');
+
+  $('#draftsList').innerHTML = html;
+  $('#draftsModal').classList.remove('hidden');
+}
+function closeDraftsModal() { $('#draftsModal').classList.add('hidden'); }
+
+async function restoreDraft(sessionId) {
+  if (state.cart.length > 0) {
+    if (!confirm(`Giỏ hiện tại có ${state.cart.length} dòng.\n\nKhôi phục nháp sẽ THAY THẾ toàn bộ.\nTiếp tục?`)) return;
+  }
+  closeDraftsModal();
+  toast('Đang khôi phục...', 'info');
+  try {
+    const url = `${CONFIG.APPS_SCRIPT_URL}?action=get-draft&sessionId=${encodeURIComponent(sessionId)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) { toast('Lỗi: ' + data.error, 'error'); return; }
+    if (!data.items || !data.items.length) { toast('Nháp rỗng', 'warn'); return; }
+
+    state.cart = data.items.map(x => ({
+      itemCode: x.itemCode, itemName: x.itemName,
+      barcode: x.barcode || '', numInSale: Number(x.numInSale) || 1,
+      uom: x.uom || '',
+      prodDate: x.prodDate || '', prodLine: x.prodLine || '',
+      prodShift: x.prodShift || '', packMachine: x.packMachine || '',
+      cases: Number(x.cases) || 0, packs: Number(x.packs) || 0, total: Number(x.total) || 0
+    }));
+    state.sessionId = sessionId;
+    state.savedStatus = 'draft';
+    state.isDirty = false;
+    state.lastSavedAt = new Date().toISOString();
+    state.finalSubmitted = false;
+    saveSession(); renderCart(); renderSessionStatus(); renderDistHeader();
+    toast(`✅ Đã khôi phục ${state.cart.length} dòng`, 'success');
+  } catch(e) { toast('Lỗi khôi phục: ' + e.message, 'error'); }
+}
+
+// ============ SCANNER ============
+let scanStream = null, scanRAF = null, barcodeDetector = null, scanVideoEl = null;
+let lastDetected = { code:'', t:0 }, zxingReader = null, scanEngine = null;
 const hasNativeDetector = () => 'BarcodeDetector' in window;
 
 async function openScanner() {
-  $('#scanModal').classList.remove('hidden');
-  $('#scanError').classList.add('hidden');
-  $('#flashBtn').classList.add('hidden');
-
+  $('#scanModal').classList.remove('hidden'); $('#scanError').classList.add('hidden'); $('#flashBtn').classList.add('hidden');
   scanEngine = hasNativeDetector() ? 'native' : 'zxing';
-  console.log('[Scanner] Engine:', scanEngine);
-
-  if (scanEngine === 'zxing' && typeof ZXing === 'undefined') {
-    showScanError('Không tải được thư viện quét', 'Kiểm tra kết nối mạng và thử lại.');
-    return;
-  }
-
+  if (scanEngine === 'zxing' && typeof ZXing === 'undefined') { showScanError('Không tải được thư viện quét', 'Kiểm tra mạng và thử lại.'); return; }
   try {
     const reader = $('#reader');
     reader.innerHTML = '<video id="scanVideo" autoplay playsinline muted style="width:100%;height:auto;border-radius:12px;"></video>';
     scanVideoEl = document.getElementById('scanVideo');
-
     scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
+      video: { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }, audio:false
     });
-    scanVideoEl.srcObject = scanStream;
-    await scanVideoEl.play();
-
+    scanVideoEl.srcObject = scanStream; await scanVideoEl.play();
     const track = scanStream.getVideoTracks()[0];
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     if (caps.torch) $('#flashBtn').classList.remove('hidden');
-
-    if (scanEngine === 'native') {
-      await startNativeScanner();
-    } else {
-      await startZXingScanner();
-    }
-
+    if (scanEngine === 'native') await startNativeScanner(); else await startZXingScanner();
   } catch (e) {
     console.error('Scanner error:', e);
-    let msg = 'Không mở được camera';
-    let hint = e.message || e.name || '';
-    if (e.name === 'NotAllowedError') {
-      msg = 'Chưa cấp quyền camera';
-      hint = 'Vào Cài đặt iOS → Safari → Camera → Cho phép. Hoặc bấm "aA" trên thanh địa chỉ → Cài đặt trang web → Camera → Cho phép.';
-    }
-    else if (e.name === 'NotFoundError') { msg = 'Không có camera'; }
-    else if (e.name === 'NotReadableError') { msg = 'Camera đang bị app khác dùng'; hint = 'Đóng Zalo/Camera/Facebook rồi thử lại'; }
+    let msg = 'Không mở được camera', hint = e.message || e.name || '';
+    if (e.name === 'NotAllowedError') { msg = 'Chưa cấp quyền camera'; hint = 'Vào Cài đặt → Safari → Camera → Cho phép'; }
+    else if (e.name === 'NotFoundError') msg = 'Không có camera';
+    else if (e.name === 'NotReadableError') { msg = 'Camera đang bị app khác dùng'; hint = 'Đóng app khác rồi thử lại'; }
     showScanError(msg, hint);
   }
 }
@@ -585,31 +544,19 @@ async function openScanner() {
 async function startNativeScanner() {
   const wanted = ['ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','codabar','itf','qr_code','data_matrix','pdf417','aztec'];
   let supported = wanted.slice();
-  try {
-    const avail = await BarcodeDetector.getSupportedFormats();
-    supported = wanted.filter(f => avail.includes(f));
-    console.log('[Scanner] Native formats:', supported);
-  } catch(err) {
-    supported = ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','codabar','itf','qr_code'];
-  }
-  if (!supported.length) {
-    showScanError('Không có format barcode được hỗ trợ', 'Dùng nút "Nhập mã SP" bên dưới.');
-    return;
-  }
+  try { const avail = await BarcodeDetector.getSupportedFormats(); supported = wanted.filter(f => avail.includes(f)); } catch(_) {}
+  if (!supported.length) { showScanError('Không có format hỗ trợ', 'Dùng "Nhập mã SP".'); return; }
   barcodeDetector = new BarcodeDetector({ formats: supported });
-
   const scanLoop = async () => {
     if (!scanVideoEl || !barcodeDetector || scanEngine !== 'native') return;
     try {
       const codes = await barcodeDetector.detect(scanVideoEl);
       if (codes.length > 0) {
-        const code = codes[0].rawValue;
-        const now = Date.now();
+        const code = codes[0].rawValue, now = Date.now();
         if (code !== lastDetected.code || now - lastDetected.t > 2000) {
           lastDetected = { code, t: now };
           if (navigator.vibrate) navigator.vibrate(80);
-          onBarcodeDetected(code);
-          return;
+          onBarcodeDetected(code); return;
         }
       }
     } catch(_) {}
@@ -620,32 +567,18 @@ async function startNativeScanner() {
 
 async function startZXingScanner() {
   const hints = new Map();
-  const formats = [
-    ZXing.BarcodeFormat.EAN_13,
-    ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.CODE_128,
-    ZXing.BarcodeFormat.CODE_39,
-    ZXing.BarcodeFormat.CODE_93,
-    ZXing.BarcodeFormat.UPC_A,
-    ZXing.BarcodeFormat.UPC_E,
-    ZXing.BarcodeFormat.CODABAR,
-    ZXing.BarcodeFormat.ITF,
-    ZXing.BarcodeFormat.QR_CODE,
-    ZXing.BarcodeFormat.DATA_MATRIX
-  ];
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.CODE_93,
+    ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E, ZXing.BarcodeFormat.CODABAR,
+    ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.QR_CODE, ZXing.BarcodeFormat.DATA_MATRIX
+  ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-
-  const reader = new ZXing.BrowserMultiFormatReader(hints, {
-    delayBetweenScanAttempts: 250,
-    delayBetweenScanSuccess: 1500
-  });
-
+  const reader = new ZXing.BrowserMultiFormatReader(hints, { delayBetweenScanAttempts:250, delayBetweenScanSuccess:1500 });
   try {
     await reader.decodeFromVideoElement(scanVideoEl, (result, err) => {
       if (result && scanEngine === 'zxing') {
-        const code = result.getText();
-        const now = Date.now();
+        const code = result.getText(), now = Date.now();
         if (code !== lastDetected.code || now - lastDetected.t > 2000) {
           lastDetected = { code, t: now };
           if (navigator.vibrate) navigator.vibrate(80);
@@ -654,27 +587,17 @@ async function startZXingScanner() {
       }
     });
     zxingReader = reader;
-  } catch (err) {
-    console.error('[ZXing] error:', err);
-    showScanError('Không quét được barcode', 'Thử lại hoặc dùng "Nhập mã SP".');
-  }
+  } catch (err) { showScanError('Không quét được', 'Dùng "Nhập mã SP".'); }
 }
 
 async function closeScanner() {
   scanEngine = null;
   if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
   if (zxingReader) { try { zxingReader.reset(); } catch(_) {} zxingReader = null; }
-  if (scanStream) {
-    scanStream.getTracks().forEach(t => t.stop());
-    scanStream = null;
-  }
-  scanVideoEl = null;
-  barcodeDetector = null;
-  state.torchOn = false;
-  $('#flashBtn').classList.add('hidden');
-  $('#flashBtn').classList.remove('bg-yellow-400','text-black');
-  $('#scanError').classList.add('hidden');
-  $('#scanModal').classList.add('hidden');
+  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  scanVideoEl = null; barcodeDetector = null; state.torchOn = false;
+  $('#flashBtn').classList.add('hidden'); $('#flashBtn').classList.remove('bg-yellow-400','text-black');
+  $('#scanError').classList.add('hidden'); $('#scanModal').classList.add('hidden');
 }
 
 async function toggleTorch() {
@@ -684,7 +607,7 @@ async function toggleTorch() {
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     if (!caps.torch) { toast('Máy không hỗ trợ đèn flash','error'); return; }
     state.torchOn = !state.torchOn;
-    await track.applyConstraints({ advanced: [{ torch: state.torchOn }] });
+    await track.applyConstraints({ advanced:[{ torch: state.torchOn }] });
     $('#flashBtn').classList.toggle('bg-yellow-400', state.torchOn);
     $('#flashBtn').classList.toggle('text-black', state.torchOn);
   } catch(e) { toast('Không bật được đèn','error'); }
@@ -692,20 +615,15 @@ async function toggleTorch() {
 
 function showScanError(msg, hint) {
   $('#scanErrorMsg').textContent = msg;
-  const hintEl = $('#scanErrorHint');
-  if (hintEl) hintEl.textContent = hint || '';
-  $('#scanError').classList.remove('hidden');
-  $('#flashBtn').classList.add('hidden');
+  const hintEl = $('#scanErrorHint'); if (hintEl) hintEl.textContent = hint || '';
+  $('#scanError').classList.remove('hidden'); $('#flashBtn').classList.add('hidden');
 }
 
 function onBarcodeDetected(code) {
   const found = findItemByScanCode(code);
   if (!found) {
-    const codeType = code.length === 14 ? 'ITF-14 (thùng)' : (code.length === 13 ? 'EAN-13' : '');
-    closeScanner().then(() => {
-      openItemCodeModal(code, codeType);
-      toast('❌ Không tìm thấy: ' + code, 'error');
-    });
+    const codeType = code.length === 14 ? 'ITF-14' : (code.length === 13 ? 'EAN-13' : '');
+    closeScanner().then(() => { openItemCodeModal(code, codeType); toast('❌ Không tìm thấy: ' + code, 'error'); });
     return;
   }
   found.item._matchedType = found.type;
@@ -717,83 +635,58 @@ function onBarcodeDetected(code) {
 // ============ SEARCH ============
 function openSearch() {
   $('#searchModal').classList.remove('hidden');
-  $('#searchInput').value = '';
-  renderSearchResults('');
-  setTimeout(()=>$('#searchInput').focus(), 100);
+  $('#searchInput').value = ''; renderSearchResults('');
+  setTimeout(() => $('#searchInput').focus(), 100);
 }
 function closeSearch() { $('#searchModal').classList.add('hidden'); }
-
 function renderSearchResults(q) {
-  const nq = normalize(q);
-  const box = $('#searchResults');
+  const nq = normalize(q); const box = $('#searchResults');
   if (!q || q.length < 2) {
     const preview = state.items.slice(0, 30);
-    box.innerHTML = `<p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">Gợi ý ${preview.length}/${state.items.length} SKU</p>`
-      + preview.map(it => rowHTML(it)).join('');
+    box.innerHTML = `<p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">Gợi ý ${preview.length}/${state.items.length} SKU</p>` + preview.map(rowHTML).join('');
     return;
   }
-  const hits = state.items.filter(it =>
-    normalize(it.name).includes(nq) || normalize(it.frgn).includes(nq) || normalize(it.code).includes(nq)
-  ).slice(0, 100);
+  const hits = state.items.filter(it => normalize(it.name).includes(nq) || normalize(it.frgn).includes(nq) || normalize(it.code).includes(nq)).slice(0, 100);
   if (!hits.length) { box.innerHTML = '<p class="text-slate-400 text-sm p-4">Không tìm thấy.</p>'; return; }
-  box.innerHTML = `<p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">${hits.length} kết quả</p>`
-    + hits.map(it => rowHTML(it)).join('');
+  box.innerHTML = `<p class="text-xs text-slate-400 px-4 py-2 bg-slate-50 sticky top-0">${hits.length} kết quả</p>` + hits.map(rowHTML).join('');
 }
 function rowHTML(it) {
   const code = it.code.replace(/"/g,'&quot;');
   const bcLine = [];
   if (it.barcode) bcLine.push('BC: ' + it.barcode);
   if (it.posCsCode) bcLine.push('CS: ' + it.posCsCode);
-  return `
-    <button class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100"
-      onclick='pickSearchResult("${code}")'>
-      <div class="font-semibold text-slate-800 text-sm">${it.name || '(không tên)'}</div>
-      ${it.frgn && it.frgn!==it.name ? `<div class="text-xs text-slate-400 italic">${it.frgn}</div>` : ''}
-      <div class="text-xs text-slate-500 mt-0.5">
-        <span class="font-mono">${it.code}</span>
-        ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">không BC/CS</span>'}
-        • 1 thùng = ${fmt(it.numInSale)} ${it.uom||'sp'}
-      </div>
-    </button>`;
+  return `<button class="w-full text-left p-3 border-b border-slate-100 hover:bg-blue-50 active:bg-blue-100" onclick='pickSearchResult("${code}")'>
+    <div class="font-semibold text-slate-800 text-sm">${it.name || '(không tên)'}</div>
+    ${it.frgn && it.frgn!==it.name ? `<div class="text-xs text-slate-400 italic">${it.frgn}</div>` : ''}
+    <div class="text-xs text-slate-500 mt-0.5">
+      <span class="font-mono">${it.code}</span>
+      ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">không BC/CS</span>'}
+      • 1 thùng = ${fmt(it.numInSale)} ${it.uom||'sp'}
+    </div></button>`;
 }
 function pickSearchResult(code) {
-  const item = state.itemByCode.get(normKey(code));
-  if (!item) return;
-  toastLong(`🔍 → ${item.name}`, 'success');
-  closeSearch();
-  openQtyModal(item);
+  const item = state.itemByCode.get(normKey(code)); if (!item) return;
+  toastLong(`🔍 → ${item.name}`, 'success'); closeSearch(); openQtyModal(item);
 }
 
-// ============ ITEM CODE MANUAL INPUT ============
+// ============ ITEM CODE MODAL ============
 function openItemCodeModal(prefillCode, codeType) {
   $('#itemCodeModal').classList.remove('hidden');
   $('#itemCodeInput').value = prefillCode || '';
-  $('#itemCodePreview').innerHTML = '';
-  $('#itemCodePreview').classList.add('hidden');
+  $('#itemCodePreview').innerHTML = ''; $('#itemCodePreview').classList.add('hidden');
   $('#itemCodeWarn').classList.add('hidden');
-
   if (prefillCode) {
-    $('#itemCodeWarn').innerHTML = `
-      <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
-        <div class="text-sm text-red-700 font-semibold">❌ Không tìm thấy mã này trong hệ thống</div>
-        <div class="text-xs text-red-600 mt-1">
-          Mã đã quét: <span class="font-mono font-bold">${prefillCode}</span>
-          ${codeType ? ' (' + codeType + ')' : ''}
-        </div>
-        <div class="text-xs text-red-600 mt-2">
-          → Sửa lại mã, hoặc chuyển sang <b>tìm theo tên sản phẩm</b>.
-        </div>
-      </div>`;
-    $('#itemCodeWarn').classList.remove('hidden');
-    onItemCodeInput();
+    $('#itemCodeWarn').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
+      <div class="text-sm text-red-700 font-semibold">❌ Không tìm thấy mã này</div>
+      <div class="text-xs text-red-600 mt-1">Mã quét: <span class="font-mono font-bold">${prefillCode}</span> ${codeType ? '('+codeType+')' : ''}</div>
+      <div class="text-xs text-red-600 mt-2">→ Sửa mã, hoặc tìm theo tên SP.</div></div>`;
+    $('#itemCodeWarn').classList.remove('hidden'); onItemCodeInput();
   }
   setTimeout(() => $('#itemCodeInput').focus(), 120);
 }
 function closeItemCodeModal() {
-  $('#itemCodeModal').classList.add('hidden');
-  $('#itemCodeInput').value = '';
-  $('#itemCodePreview').classList.add('hidden');
-  $('#itemCodeWarn').classList.add('hidden');
+  $('#itemCodeModal').classList.add('hidden'); $('#itemCodeInput').value = '';
+  $('#itemCodePreview').classList.add('hidden'); $('#itemCodeWarn').classList.add('hidden');
 }
 function onItemCodeInput() {
   const code = $('#itemCodeInput').value.trim();
@@ -804,22 +697,16 @@ function onItemCodeInput() {
     const bcLine = [];
     if (item.barcode) bcLine.push('BC: ' + item.barcode);
     if (item.posCsCode) bcLine.push('CS: ' + item.posCsCode);
-    preview.innerHTML = `
-      <div class="bg-green-50 border border-green-200 rounded-lg p-3">
-        <div class="font-semibold text-green-800 text-sm">✅ ${item.name || '(không tên)'}</div>
-        ${item.frgn && item.frgn !== item.name ? `<div class="text-xs text-green-700 italic mt-0.5">${item.frgn}</div>` : ''}
-        <div class="text-xs text-green-700 mt-1">
-          <span class="font-mono">${item.code}</span>
-          ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">Không BC/CS</span>'}
-          • 1 thùng = ${fmt(item.numInSale)} ${item.uom || 'sp'}
-        </div>
-      </div>`;
+    preview.innerHTML = `<div class="bg-green-50 border border-green-200 rounded-lg p-3">
+      <div class="font-semibold text-green-800 text-sm">✅ ${item.name || '(không tên)'}</div>
+      ${item.frgn && item.frgn !== item.name ? `<div class="text-xs text-green-700 italic mt-0.5">${item.frgn}</div>` : ''}
+      <div class="text-xs text-green-700 mt-1"><span class="font-mono">${item.code}</span>
+      ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">Không BC/CS</span>'}
+      • 1 thùng = ${fmt(item.numInSale)} ${item.uom || 'sp'}</div></div>`;
   } else {
-    preview.innerHTML = `
-      <div class="bg-red-50 border border-red-200 rounded-lg p-3">
-        <div class="text-sm text-red-700">❌ Không tìm thấy mã: <span class="font-mono font-bold">${code}</span></div>
-        <div class="text-xs text-red-600 mt-1">Kiểm tra lại hoặc dùng "Tìm theo tên SP" bên dưới</div>
-      </div>`;
+    preview.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-lg p-3">
+      <div class="text-sm text-red-700">❌ Không tìm thấy: <span class="font-mono font-bold">${code}</span></div>
+      <div class="text-xs text-red-600 mt-1">Kiểm tra lại hoặc "Tìm theo tên SP"</div></div>`;
   }
   preview.classList.remove('hidden');
 }
@@ -829,146 +716,98 @@ function submitItemCode() {
   const item = state.itemByCode.get(normKey(code));
   if (!item) return toast('Không tìm thấy mã: ' + code, 'error');
   toastLong(`⌨️ → ${item.name}`, 'success');
-  closeItemCodeModal();
-  openQtyModal(item);
+  closeItemCodeModal(); openQtyModal(item);
 }
 function scanToManual() {
   const lastCode = lastDetected.code;
-  const codeType = lastCode ? (lastCode.length === 14 ? 'ITF-14 (thùng)' : (lastCode.length === 13 ? 'EAN-13' : '')) : '';
-  closeScanner().then(() => {
-    openItemCodeModal(lastCode, codeType);
-  });
+  const codeType = lastCode ? (lastCode.length === 14 ? 'ITF-14' : (lastCode.length === 13 ? 'EAN-13' : '')) : '';
+  closeScanner().then(() => { openItemCodeModal(lastCode, codeType); });
 }
-function gotoSearchFromItemCode() {
-  closeItemCodeModal();
-  openSearch();
-}
+function gotoSearchFromItemCode() { closeItemCodeModal(); openSearch(); }
 
 // ============ QTY MODAL ============
 let currentItem = null;
-
 function openQtyModal(item, prefillRow) {
   const isEdit = !!prefillRow;
   if (!isEdit) state.editingIndex = null;
-
   if (!isEdit) {
-    const lastTime = state.recentScans[item.code];
-    const now = Date.now();
+    const lastTime = state.recentScans[item.code]; const now = Date.now();
     if (lastTime && (now - lastTime) < CONFIG.DUP_WINDOW_MIN * 60 * 1000) {
-      const mins = Math.floor((now - lastTime) / 60000);
-      const secs = Math.floor(((now - lastTime) % 60000) / 1000);
+      const mins = Math.floor((now - lastTime)/60000);
+      const secs = Math.floor(((now - lastTime) % 60000)/1000);
       const when = mins > 0 ? `${mins} phút` : `${secs} giây`;
-      if (!confirm(`⚠️ SKU "${item.name}" vừa nhập ${when} trước.\n\nTiếp tục nhập thêm?`)) {
+      if (!confirm(`⚠️ SKU "${item.name}" vừa nhập ${when} trước.\n\nTiếp tục?`)) {
         if (state.continuousMode) setTimeout(() => openScanner(), 300);
         return;
       }
     }
     state.recentScans[item.code] = now;
   }
-
   currentItem = item;
-
   let scanTypeBadge = '';
   if (item._matchedType === 'poscs') scanTypeBadge = '<span class="badge-type badge-poscs">📦 CS 14 số</span>';
   else if (item._matchedType === 'barcode') scanTypeBadge = '<span class="badge-type badge-barcode">📷 BC 13 số</span>';
   item._matchedType = null;
 
-  const modeBadge = $('#qtyModalMode');
-  const addBtn = $('#qtyAddBtn');
+  const modeBadge = $('#qtyModalMode'); const addBtn = $('#qtyAddBtn');
   if (isEdit) {
-    modeBadge.classList.remove('hidden');
-    addBtn.textContent = '💾 Lưu thay đổi';
-    addBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
-    addBtn.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+    modeBadge.classList.remove('hidden'); addBtn.textContent = '💾 Lưu thay đổi';
+    addBtn.classList.remove('bg-blue-600','hover:bg-blue-700');
+    addBtn.classList.add('bg-emerald-600','hover:bg-emerald-700');
   } else {
-    modeBadge.classList.add('hidden');
-    addBtn.textContent = 'Thêm';
-    addBtn.classList.remove('bg-emerald-600', 'hover:bg-emerald-700');
-    addBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+    modeBadge.classList.add('hidden'); addBtn.textContent = 'Thêm';
+    addBtn.classList.remove('bg-emerald-600','hover:bg-emerald-700');
+    addBtn.classList.add('bg-blue-600','hover:bg-blue-700');
   }
-
   $('#qtyItemName').textContent = item.name || '(không tên)';
   const bcLine = [];
   if (item.barcode) bcLine.push('BC: <span class="font-mono">'+item.barcode+'</span>');
   if (item.posCsCode) bcLine.push('CS: <span class="font-mono">'+item.posCsCode+'</span>');
-  $('#qtyItemMeta').innerHTML = `
-    <span class="font-mono">${item.code}</span>
+  $('#qtyItemMeta').innerHTML = `<span class="font-mono">${item.code}</span>
     ${bcLine.length ? ' • '+bcLine.join(' • ') : ' • <span class="text-amber-600">Không BC/CS</span>'}
-    • 1 thùng = <b>${fmt(item.numInSale)}</b> ${item.uom || 'sp'}
-    ${scanTypeBadge}
-  `;
+    • 1 thùng = <b>${fmt(item.numInSale)}</b> ${item.uom || 'sp'} ${scanTypeBadge}`;
 
   if (isEdit) {
-    $('#qtyCases').value = prefillRow.cases || '';
-    $('#qtyPacks').value = prefillRow.packs || '';
+    $('#qtyCases').value = prefillRow.cases || ''; $('#qtyPacks').value = prefillRow.packs || '';
     $('#qtyTotal').value = prefillRow.total ? fmt(prefillRow.total) : '';
     $('#qtyProdDate').value = prefillRow.prodDate || todayISO();
-
     fillSelect('#qtyProdLine', CONFIG.PROD_LINES, '');
-    $('#qtyProdLineOther').value = '';
-    $('#qtyProdLineOther').classList.add('hidden-input');
+    $('#qtyProdLineOther').value = ''; $('#qtyProdLineOther').classList.add('hidden-input');
     if (prefillRow.prodLine) {
-      if (CONFIG.PROD_LINES.includes(prefillRow.prodLine)) {
-        $('#qtyProdLine').value = prefillRow.prodLine;
-      } else {
-        $('#qtyProdLine').value = CONFIG.OTHER_VALUE;
-        $('#qtyProdLineOther').value = prefillRow.prodLine;
-        $('#qtyProdLineOther').classList.remove('hidden-input');
-      }
+      if (CONFIG.PROD_LINES.includes(prefillRow.prodLine)) $('#qtyProdLine').value = prefillRow.prodLine;
+      else { $('#qtyProdLine').value = CONFIG.OTHER_VALUE; $('#qtyProdLineOther').value = prefillRow.prodLine; $('#qtyProdLineOther').classList.remove('hidden-input'); }
     }
-
     fillSelect('#qtyProdShift', CONFIG.PROD_SHIFTS, '');
-    $('#qtyProdShiftOther').value = '';
-    $('#qtyProdShiftOther').classList.add('hidden-input');
+    $('#qtyProdShiftOther').value = ''; $('#qtyProdShiftOther').classList.add('hidden-input');
     if (prefillRow.prodShift) {
-      if (CONFIG.PROD_SHIFTS.includes(prefillRow.prodShift)) {
-        $('#qtyProdShift').value = prefillRow.prodShift;
-      } else {
-        $('#qtyProdShift').value = CONFIG.OTHER_VALUE;
-        $('#qtyProdShiftOther').value = prefillRow.prodShift;
-        $('#qtyProdShiftOther').classList.remove('hidden-input');
-      }
+      if (CONFIG.PROD_SHIFTS.includes(prefillRow.prodShift)) $('#qtyProdShift').value = prefillRow.prodShift;
+      else { $('#qtyProdShift').value = CONFIG.OTHER_VALUE; $('#qtyProdShiftOther').value = prefillRow.prodShift; $('#qtyProdShiftOther').classList.remove('hidden-input'); }
     }
-
     fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, prefillRow.packMachine || '');
-
     const skip = !prefillRow.prodLine && !prefillRow.prodShift && !prefillRow.packMachine;
-    $('#skipProdInfo').checked = skip;
-    toggleSkipProdInfo();
+    $('#skipProdInfo').checked = skip; toggleSkipProdInfo();
   } else {
-    $('#qtyCases').value = '';
-    $('#qtyPacks').value = '';
-    $('#qtyTotal').value = '';
-    $('#qtyProdDate').value = todayISO();
-    updateCopyPrevButton();
-
-    fillSelect('#qtyProdLine',  CONFIG.PROD_LINES,  state.defaults.line);
+    $('#qtyCases').value = ''; $('#qtyPacks').value = ''; $('#qtyTotal').value = '';
+    $('#qtyProdDate').value = todayISO(); updateCopyPrevButton();
+    fillSelect('#qtyProdLine', CONFIG.PROD_LINES, state.defaults.line);
     fillSelect('#qtyProdShift', CONFIG.PROD_SHIFTS, state.defaults.shift);
-    $('#qtyProdLineOther').value = '';
-    $('#qtyProdShiftOther').value = '';
-    $('#qtyProdLineOther').classList.add('hidden-input');
-    $('#qtyProdShiftOther').classList.add('hidden-input');
+    $('#qtyProdLineOther').value = ''; $('#qtyProdShiftOther').value = '';
+    $('#qtyProdLineOther').classList.add('hidden-input'); $('#qtyProdShiftOther').classList.add('hidden-input');
     if (state.defaults.line === CONFIG.OTHER_VALUE && state.defaults.lineCustom) {
-      $('#qtyProdLineOther').value = state.defaults.lineCustom;
-      $('#qtyProdLineOther').classList.remove('hidden-input');
+      $('#qtyProdLineOther').value = state.defaults.lineCustom; $('#qtyProdLineOther').classList.remove('hidden-input');
     }
     if (state.defaults.shift === CONFIG.OTHER_VALUE && state.defaults.shiftCustom) {
-      $('#qtyProdShiftOther').value = state.defaults.shiftCustom;
-      $('#qtyProdShiftOther').classList.remove('hidden-input');
+      $('#qtyProdShiftOther').value = state.defaults.shiftCustom; $('#qtyProdShiftOther').classList.remove('hidden-input');
     }
     fillTextDatalist('#qtyPackMachine', CONFIG.PACK_MACHINES, state.defaults.machine);
-    $('#skipProdInfo').checked = false;
-    toggleSkipProdInfo();
+    $('#skipProdInfo').checked = false; toggleSkipProdInfo();
   }
-
   updateQtyTotal();
   $('#qtyModal').classList.remove('hidden');
-  setTimeout(()=>$('#qtyCases').focus(), 200);
+  setTimeout(() => $('#qtyCases').focus(), 200);
 }
-
 function updateCopyPrevButton() {
-  const btn = $('#copyPrevBtn');
-  if (!btn) return;
+  const btn = $('#copyPrevBtn'); if (!btn) return;
   if (!state.lastRow) { btn.classList.add('hidden'); return; }
   btn.classList.remove('hidden');
   const parts = [];
@@ -982,76 +821,52 @@ function copyPreviousRow() {
   if (!state.lastRow) return;
   const r = state.lastRow;
   if (r.prodDate) $('#qtyProdDate').value = r.prodDate;
-  const lineSelect = $('#qtyProdLine');
-  const shiftSelect = $('#qtyProdShift');
+  const lineSelect = $('#qtyProdLine'), shiftSelect = $('#qtyProdShift');
   if (r.prodLine) {
     const inList = CONFIG.PROD_LINES.includes(r.prodLine);
     if (inList) { lineSelect.value = r.prodLine; $('#qtyProdLineOther').classList.add('hidden-input'); }
-    else {
-      lineSelect.value = CONFIG.OTHER_VALUE;
-      $('#qtyProdLineOther').value = r.prodLine;
-      $('#qtyProdLineOther').classList.remove('hidden-input');
-    }
+    else { lineSelect.value = CONFIG.OTHER_VALUE; $('#qtyProdLineOther').value = r.prodLine; $('#qtyProdLineOther').classList.remove('hidden-input'); }
   }
   if (r.prodShift) {
     const inList = CONFIG.PROD_SHIFTS.includes(r.prodShift);
     if (inList) { shiftSelect.value = r.prodShift; $('#qtyProdShiftOther').classList.add('hidden-input'); }
-    else {
-      shiftSelect.value = CONFIG.OTHER_VALUE;
-      $('#qtyProdShiftOther').value = r.prodShift;
-      $('#qtyProdShiftOther').classList.remove('hidden-input');
-    }
+    else { shiftSelect.value = CONFIG.OTHER_VALUE; $('#qtyProdShiftOther').value = r.prodShift; $('#qtyProdShiftOther').classList.remove('hidden-input'); }
   }
   if (r.packMachine) $('#qtyPackMachine').value = r.packMachine;
   toast('Đã điền lại thông tin SX', 'success');
 }
-
 function fillSelect(sel, options, selected) {
-  $(sel).innerHTML = '<option value="">-- chọn --</option>' +
-    options.map(o => `<option value="${o}" ${o===selected?'selected':''}>${o}</option>`).join('');
+  $(sel).innerHTML = '<option value="">-- chọn --</option>' + options.map(o => `<option value="${o}" ${o===selected?'selected':''}>${o}</option>`).join('');
 }
 function fillTextDatalist(sel, options, value) {
   $(sel).value = value || '';
-  const dl = $('#machineList');
-  if (dl) dl.innerHTML = options.map(o => `<option value="${o}"></option>`).join('');
+  const dl = $('#machineList'); if (dl) dl.innerHTML = options.map(o => `<option value="${o}"></option>`).join('');
 }
 function onLineChange() {
-  const val = $('#qtyProdLine').value;
-  const otherInput = $('#qtyProdLineOther');
+  const val = $('#qtyProdLine').value; const otherInput = $('#qtyProdLineOther');
   if (val === CONFIG.OTHER_VALUE) { otherInput.classList.remove('hidden-input'); setTimeout(()=>otherInput.focus(), 100); }
   else { otherInput.classList.add('hidden-input'); otherInput.value = ''; }
 }
 function onShiftChange() {
-  const val = $('#qtyProdShift').value;
-  const otherInput = $('#qtyProdShiftOther');
+  const val = $('#qtyProdShift').value; const otherInput = $('#qtyProdShiftOther');
   if (val === CONFIG.OTHER_VALUE) { otherInput.classList.remove('hidden-input'); setTimeout(()=>otherInput.focus(), 100); }
   else { otherInput.classList.add('hidden-input'); otherInput.value = ''; }
 }
 function toggleSkipProdInfo() {
-  const skip = $('#skipProdInfo').checked;
-  const wrap = $('#prodInfoFields');
-  if (skip) wrap.classList.add('skip-mode');
-  else wrap.classList.remove('skip-mode');
+  const skip = $('#skipProdInfo').checked; const wrap = $('#prodInfoFields');
+  if (skip) wrap.classList.add('skip-mode'); else wrap.classList.remove('skip-mode');
 }
-function closeQtyModal() {
-  $('#qtyModal').classList.add('hidden');
-  currentItem = null;
-  state.editingIndex = null;
-}
+function closeQtyModal() { $('#qtyModal').classList.add('hidden'); currentItem = null; state.editingIndex = null; }
 function updateQtyTotal() {
   if (!currentItem) return;
-  const c = parseFloat($('#qtyCases').value) || 0;
-  const p = parseFloat($('#qtyPacks').value) || 0;
+  const c = parseFloat($('#qtyCases').value) || 0, p = parseFloat($('#qtyPacks').value) || 0;
   const total = c * currentItem.numInSale + p;
   if (c || p) $('#qtyTotal').value = fmt(total);
-  $('#qtyBreakdown').textContent =
-    `${fmt(c)} thùng × ${fmt(currentItem.numInSale)} + ${fmt(p)} lẻ = ${fmt(total)} ${currentItem.uom || 'sp'}`;
+  $('#qtyBreakdown').textContent = `${fmt(c)} thùng × ${fmt(currentItem.numInSale)} + ${fmt(p)} lẻ = ${fmt(total)} ${currentItem.uom || 'sp'}`;
 }
-
 function addToCart() {
   if (!currentItem) return;
-  const c = parseFloat($('#qtyCases').value) || 0;
-  const p = parseFloat($('#qtyPacks').value) || 0;
+  const c = parseFloat($('#qtyCases').value) || 0, p = parseFloat($('#qtyPacks').value) || 0;
   const totalRaw = $('#qtyTotal').value.trim();
   let total;
   if (totalRaw && c===0 && p===0) total = parseFloat(totalRaw.replace(/\./g,'').replace(/,/g,'')) || 0;
@@ -1063,27 +878,17 @@ function addToCart() {
 
   const skip = $('#skipProdInfo').checked;
   let prodLine = '', prodShift = '', packMachine = '';
-
   if (!skip) {
     prodLine = $('#qtyProdLine').value;
-    if (prodLine === CONFIG.OTHER_VALUE) {
-      const custom = $('#qtyProdLineOther').value.trim();
-      if (!custom) return toast('Nhập Line sản xuất (Orther)', 'error');
-      prodLine = custom;
-    }
+    if (prodLine === CONFIG.OTHER_VALUE) { const custom = $('#qtyProdLineOther').value.trim(); if (!custom) return toast('Nhập Line (Orther)', 'error'); prodLine = custom; }
     prodShift = $('#qtyProdShift').value;
-    if (prodShift === CONFIG.OTHER_VALUE) {
-      const custom = $('#qtyProdShiftOther').value.trim();
-      if (!custom) return toast('Nhập Ca sản xuất (Orther)', 'error');
-      prodShift = custom;
-    }
+    if (prodShift === CONFIG.OTHER_VALUE) { const custom = $('#qtyProdShiftOther').value.trim(); if (!custom) return toast('Nhập Ca (Orther)', 'error'); prodShift = custom; }
     packMachine = $('#qtyPackMachine').value.trim();
-    if (!prodLine)     return toast('Chọn Line sản xuất', 'error');
-    if (!prodShift)    return toast('Chọn Ca sản xuất', 'error');
-    if (!packMachine)  return toast('Nhập số máy đóng gói', 'error');
-
+    if (!prodLine)     return toast('Chọn Line', 'error');
+    if (!prodShift)    return toast('Chọn Ca', 'error');
+    if (!packMachine)  return toast('Nhập số máy', 'error');
     state.defaults = {
-      line:  $('#qtyProdLine').value === CONFIG.OTHER_VALUE ? CONFIG.OTHER_VALUE : prodLine,
+      line: $('#qtyProdLine').value === CONFIG.OTHER_VALUE ? CONFIG.OTHER_VALUE : prodLine,
       lineCustom: $('#qtyProdLine').value === CONFIG.OTHER_VALUE ? prodLine : '',
       shift: $('#qtyProdShift').value === CONFIG.OTHER_VALUE ? CONFIG.OTHER_VALUE : prodShift,
       shiftCustom: $('#qtyProdShift').value === CONFIG.OTHER_VALUE ? prodShift : '',
@@ -1103,35 +908,22 @@ function addToCart() {
   if (state.editingIndex !== null) {
     state.cart[state.editingIndex] = newRow;
     state.lastRow = { prodDate, prodLine, prodShift, packMachine };
-    saveSession();
-    renderCart();
-    const idx = state.editingIndex;
-    state.editingIndex = null;
-    closeQtyModal();
+    saveSession(); renderCart();
+    const idx = state.editingIndex; state.editingIndex = null;
+    closeQtyModal(); markDirty();
     toast('✅ Đã cập nhật dòng #' + (idx + 1), 'success');
     return;
   }
 
   const key = cartKey(newRow);
   const existing = state.cart.find(x => cartKey(x) === key);
-  if (existing) {
-    existing.cases += c; existing.packs += p; existing.total += total;
-  } else state.cart.push(newRow);
-
+  if (existing) { existing.cases += c; existing.packs += p; existing.total += total; }
+  else state.cart.push(newRow);
   state.lastRow = { prodDate, prodLine, prodShift, packMachine };
-
-  saveSession();
-  renderCart();
-  closeQtyModal();
-
-  if (state.continuousMode) {
-    toast('Đã thêm. Đang mở camera...', 'success');
-    setTimeout(() => openScanner(), 800);
-  } else {
-    toast('Đã thêm: ' + currentItem.name, 'success');
-  }
+  saveSession(); renderCart(); closeQtyModal(); markDirty();
+  if (state.continuousMode) { toast('Đã thêm. Mở camera...', 'success'); setTimeout(() => openScanner(), 800); }
+  else toast('Đã thêm: ' + currentItem.name, 'success');
 }
-
 function toggleContinuous() {
   state.continuousMode = !state.continuousMode;
   localStorage.setItem('kks_continuous', state.continuousMode);
@@ -1160,13 +952,10 @@ function renderCart() {
           <span class="bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">📅 ${x.prodDate||'—'}</span>
           <span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded italic">Bỏ qua Line/Ca/Máy</span>
         </div>`;
-    return `
-    <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200 flex items-start gap-3">
+    return `<div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200 flex items-start gap-3">
       <div class="flex-1 min-w-0">
         <div class="font-semibold text-slate-800 text-sm truncate">${x.itemName||'(không tên)'}</div>
-        <div class="text-xs text-slate-500 mt-0.5">
-          <span class="font-mono">${x.itemCode}</span>${x.barcode ? ' • BC: '+x.barcode : ''}
-        </div>
+        <div class="text-xs text-slate-500 mt-0.5"><span class="font-mono">${x.itemCode}</span>${x.barcode ? ' • BC: '+x.barcode : ''}</div>
         ${prodBadges}
         <div class="text-xs text-slate-600 mt-1">
           <span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">${fmt(x.cases)} thùng</span>
@@ -1181,22 +970,19 @@ function renderCart() {
           <button onclick="editCartItem(${i})" class="text-blue-600 text-xs font-semibold">✏️ Sửa</button>
           <button onclick="removeCart(${i})" class="text-red-500 text-xs">✕ Xoá</button>
         </div>
-      </div>
-    </div>`;
+      </div></div>`;
   }).join('');
   updateSummary();
 }
 function removeCart(i) {
   if (!confirm('Xoá dòng này?')) return;
-  state.cart.splice(i,1); saveSession(); renderCart();
+  state.cart.splice(i,1); saveSession(); renderCart(); markDirty();
 }
 function editCartItem(i) {
-  const row = state.cart[i];
-  if (!row) return;
+  const row = state.cart[i]; if (!row) return;
   const item = state.itemByCode.get(normKey(row.itemCode));
-  if (!item) { toast('Không tìm thấy SP trong danh mục', 'error'); return; }
-  state.editingIndex = i;
-  openQtyModal(item, row);
+  if (!item) { toast('Không tìm thấy SP', 'error'); return; }
+  state.editingIndex = i; openQtyModal(item, row);
 }
 function updateSummary() {
   const totalQty = state.cart.reduce((s,x)=>s+x.total,0);
@@ -1204,19 +990,137 @@ function updateSummary() {
   $('#sumQty').textContent = fmt(totalQty);
 }
 
-// ============ EXPORT ============
+// ============ SAVE DRAFT ============
+async function saveDraft() {
+  if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
+  if (!state.currentUser) return toast('Thiếu thông tin người thực hiện', 'error');
+  if (state.finalSubmitted) return toast('Phiên đã gửi chính thức', 'warn');
+
+  const payload = {
+    action: 'save-draft',
+    distributor: state.currentDistributor,
+    user: state.currentUser,
+    sessionId: state.sessionId,
+    location: state.location,
+    items: state.cart
+  };
+  const payloadStr = JSON.stringify(payload);
+
+  if (!navigator.onLine) {
+    const queue = getOfflineQueue();
+    queue.push({ id: Date.now() + Math.random(), payload: payloadStr });
+    setOfflineQueue(queue);
+    toast('Offline: hàng đợi chờ gửi', 'warn');
+    return;
+  }
+
+  try {
+    await fetch(CONFIG.APPS_SCRIPT_URL, {
+      method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: payloadStr
+    });
+    state.isDirty = false;
+    state.savedStatus = 'draft';
+    state.lastSavedAt = new Date().toISOString();
+    saveSession(); renderSessionStatus();
+    toast('💾 Đã lưu nháp', 'success');
+  } catch(e) {
+    const queue = getOfflineQueue();
+    queue.push({ id: Date.now() + Math.random(), payload: payloadStr });
+    setOfflineQueue(queue);
+    toast('Lỗi — đã lưu vào hàng đợi', 'warn');
+  }
+}
+
+// ============ SUBMIT FINAL ============
+async function submitFinal() {
+  if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
+  if (!state.currentUser) return toast('Thiếu thông tin người thực hiện', 'error');
+  if (state.finalSubmitted) return toast('Đã gửi chính thức rồi', 'warn');
+
+  const u = state.currentUser;
+  const draftWarn = state.savedStatus === 'draft'
+    ? `\n• Nháp hiện tại sẽ bị THAY THẾ bằng bản chính thức.`
+    : '';
+
+  if (!confirm(`GỬI CHÍNH THỨC ${state.cart.length} dòng?\nNgười TH: ${u.name} — ${u.phone}${draftWarn}`)) return;
+  if (!confirm(`⚠️ XÁC NHẬN LẦN 2\n\nSau khi gửi chính thức:\n• Dữ liệu được LƯU CỐ ĐỊNH\n• Không thể sửa qua webapp\n• Bản nháp cũ bị xóa\n\nBạn có CHẮC CHẮN đã kiểm kê XONG?`)) return;
+
+  const payload = {
+    action: 'submit-final',
+    distributor: state.currentDistributor,
+    user: state.currentUser,
+    sessionId: state.sessionId,
+    location: state.location,
+    items: state.cart
+  };
+  const payloadStr = JSON.stringify(payload);
+
+  if (!navigator.onLine) {
+    toast('Không thể gửi chính thức khi offline', 'error');
+    return;
+  }
+
+  try {
+    toast('Đang gửi...', 'info');
+    await fetch(CONFIG.APPS_SCRIPT_URL, {
+      method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: payloadStr
+    });
+    state.isDirty = false;
+    state.savedStatus = 'final';
+    state.lastSavedAt = new Date().toISOString();
+    state.finalSubmitted = true;
+
+    const oldSessionId = state.sessionId;
+    saveSession(); renderSessionStatus();
+    toastLong(`✅ Đã gửi chính thức!\nSession: ${oldSessionId}`, 'success', 5000);
+
+    // Sau 2s: clear cart + reset cho session mới
+    setTimeout(() => {
+      if (!confirm('Đã gửi xong. Xóa giỏ hàng và bắt đầu phiên mới?')) return;
+      state.cart = [];
+      state.sessionId = genSessionId();
+      state.savedStatus = 'none';
+      state.lastSavedAt = null;
+      state.finalSubmitted = false;
+      state.isDirty = false;
+      state.recentScans = {};
+      saveSession(); renderCart(); renderSessionStatus(); renderDistHeader();
+      toast('Đã bắt đầu phiên mới', 'success');
+    }, 2200);
+
+  } catch(e) {
+    toast('Lỗi gửi: ' + e.message, 'error');
+  }
+}
+
+// ============ AUTO-SAVE ============
+setInterval(() => {
+  if (!state.autoSaveEnabled) return;
+  if (!state.isDirty) return;
+  if (!state.cart.length) return;
+  if (!state.currentUser) return;
+  if (state.finalSubmitted) return;
+  if (!navigator.onLine) return;
+  console.log('[AutoSave] Saving draft...');
+  saveDraft().catch(e => console.warn('AutoSave failed:', e));
+}, CONFIG.AUTOSAVE_SEC * 1000);
+
+// ============ EXPORT CSV ============
 function exportCSV() {
   if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
-  const d = state.currentDistributor;
-  const u = state.currentUser || {};
-  const L = state.location;
+  const d = state.currentDistributor, u = state.currentUser || {}, L = state.location;
   const rows = [
-    ['SessionID','DistributorCode','DistributorName','UserName','UserPhone',
+    ['SessionID','Status','DistributorCode','DistributorName','UserName','UserPhone',
      'LocationLat','LocationLng','LocationAddress',
      'ItemCode','ItemName','CodeBars','NumInSale','SalUnitMsr',
      'ProdDate','ProdLine','ProdShift','PackMachine','Cases','Packs','Total','Timestamp'],
     ...state.cart.map(x => [
-      state.sessionId, d.code, d.name, u.name, u.phone,
+      state.sessionId, state.finalSubmitted ? 'Final' : 'Draft',
+      d.code, d.name, u.name, u.phone,
       L.lat || '', L.lng || '', L.address || '',
       x.itemCode, x.itemName, x.barcode, x.numInSale, x.uom,
       x.prodDate, x.prodLine, x.prodShift, x.packMachine,
@@ -1233,50 +1137,6 @@ function exportCSV() {
   toast('Đã xuất CSV', 'success');
 }
 
-async function submitToSheet() {
-  if (!CONFIG.APPS_SCRIPT_URL) return toast('Chưa cấu hình endpoint', 'error');
-  if (!state.cart.length) return toast('Chưa có dữ liệu', 'error');
-  if (!state.currentUser) return toast('Thiếu thông tin người thực hiện', 'error');
-
-  const u = state.currentUser;
-  const payload = {
-    distributor: state.currentDistributor,
-    user: state.currentUser,
-    sessionId: state.sessionId,
-    location: state.location,
-    items: state.cart,
-    timestamp: new Date().toISOString()
-  };
-  const payloadStr = JSON.stringify(payload);
-
-  if (!navigator.onLine) {
-    const queue = getOfflineQueue();
-    queue.push({ id: Date.now() + Math.random(), payload: payloadStr, timestamp: new Date().toISOString() });
-    setOfflineQueue(queue);
-    toast(`Offline: đã lưu ${state.cart.length} dòng vào hàng đợi`, 'warn');
-    if (confirm('Xóa giỏ hàng và kết thúc phiên hiện tại?')) {
-      state.cart = []; saveSession(); renderCart();
-    }
-    return;
-  }
-
-  if (!confirm(`Gửi ${state.cart.length} dòng?\nNgười TH: ${u.name} — ${u.phone}\nSession: ${state.sessionId}`)) return;
-
-  try {
-    await fetch(CONFIG.APPS_SCRIPT_URL, {
-      method: 'POST', mode: 'no-cors',
-      headers: {'Content-Type':'text/plain;charset=utf-8'},
-      body: payloadStr
-    });
-    toast('Đã gửi! (kiểm tra Sheet để xác nhận)', 'success');
-  } catch(e) {
-    const queue = getOfflineQueue();
-    queue.push({ id: Date.now() + Math.random(), payload: payloadStr, timestamp: new Date().toISOString() });
-    setOfflineQueue(queue);
-    toast('Lỗi mạng — đã lưu vào hàng đợi', 'warn');
-  }
-}
-
 // ============ BIND ============
 window.addEventListener('DOMContentLoaded', () => {
   $('#loginBtn').onclick = doLogin;
@@ -1288,6 +1148,8 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#continuousBtn').onclick = toggleContinuous;
   $('#installBtn').onclick = installPWA;
   $('#locEnable').addEventListener('change', toggleLocation);
+  $('#restoreDraftBtn').onclick = () => checkDraftsOnLogin();
+  $('#closeDraftsBtn').onclick = closeDraftsModal;
 
   $('#scanBtn').onclick = openScanner;
   $('#closeScanBtn').onclick = closeScanner;
@@ -1303,56 +1165,38 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#itemCodeCancelBtn').onclick = closeItemCodeModal;
   $('#itemCodeNextBtn').onclick = submitItemCode;
   $('#itemCodeInput').addEventListener('input', onItemCodeInput);
-  $('#itemCodeInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); submitItemCode(); }
-  });
+  $('#itemCodeInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitItemCode(); } });
   $('#scanToManualBtn').onclick = scanToManual;
   $('#gotoSearchBtn').onclick = gotoSearchFromItemCode;
 
   $('#qtyCases').addEventListener('input', updateQtyTotal);
   $('#qtyPacks').addEventListener('input', updateQtyTotal);
-  $('#qtyCases').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); $('#qtyPacks').focus(); }
-  });
-  $('#qtyPacks').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); addToCart(); }
-  });
+  $('#qtyCases').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#qtyPacks').focus(); } });
+  $('#qtyPacks').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addToCart(); } });
   $('#qtyCancelBtn').onclick = closeQtyModal;
   $('#qtyAddBtn').onclick = addToCart;
   $('#copyPrevBtn').onclick = copyPreviousRow;
-
   $('#qtyProdLine').addEventListener('change', onLineChange);
   $('#qtyProdShift').addEventListener('change', onShiftChange);
   $('#skipProdInfo').addEventListener('change', toggleSkipProdInfo);
 
   $('#exportBtn').onclick = exportCSV;
-  $('#submitBtn').onclick = submitToSheet;
+  $('#saveDraftBtn').onclick = saveDraft;
+  $('#submitBtn').onclick = submitFinal;
 
+  // Auto-collapse header
   let headerCollapsed = false;
   const headerExpanded = $('#headerExpanded');
   const headerToggleBtn = $('#headerToggleBtn');
-
   function setHeaderCollapsed(collapsed) {
     if (collapsed === headerCollapsed) return;
     headerCollapsed = collapsed;
-    if (collapsed) {
-      headerExpanded.style.maxHeight = '0px';
-      headerExpanded.style.opacity = '0';
-      headerToggleBtn.style.transform = 'rotate(-90deg)';
-    } else {
-      headerExpanded.style.maxHeight = '300px';
-      headerExpanded.style.opacity = '1';
-      headerToggleBtn.style.transform = 'rotate(0deg)';
-    }
+    if (collapsed) { headerExpanded.style.maxHeight = '0px'; headerExpanded.style.opacity = '0'; headerToggleBtn.style.transform = 'rotate(-90deg)'; }
+    else { headerExpanded.style.maxHeight = '300px'; headerExpanded.style.opacity = '1'; headerToggleBtn.style.transform = 'rotate(0deg)'; }
   }
-
   headerExpanded.style.maxHeight = '300px';
   headerExpanded.style.transition = 'max-height 0.25s ease, opacity 0.2s ease';
-
-  headerToggleBtn.addEventListener('click', () => {
-    setHeaderCollapsed(!headerCollapsed);
-  });
-
+  headerToggleBtn.addEventListener('click', () => setHeaderCollapsed(!headerCollapsed));
   let lastScrollY = 0;
   window.addEventListener('scroll', () => {
     const y = window.scrollY;
@@ -1396,12 +1240,8 @@ window.addEventListener('DOMContentLoaded', () => {
       <input id="loginInput" type="text" autocomplete="off" placeholder="VD: NPP001, Công ty ABC, Bà Tư..."
         class="w-full border border-slate-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     </div>
-    <button id="loginBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl mt-5">
-      Đăng nhập
-    </button>
-    <button id="installBtn" class="hidden w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded-xl mt-3 text-sm">
-      📲 Cài đặt app lên màn hình chính
-    </button>
+    <button id="loginBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl mt-5">Đăng nhập</button>
+    <button id="installBtn" class="hidden w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded-xl mt-3 text-sm">📲 Cài đặt app lên màn hình chính</button>
   </div>
 </div>
 
@@ -1411,7 +1251,7 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="max-w-2xl mx-auto px-4">
       <div class="flex items-center justify-between gap-2 py-2">
         <div class="flex items-center gap-2 min-w-0 flex-1">
-          <button id="headerToggleBtn" class="text-lg flex-shrink-0 transition-transform duration-200" aria-label="Mở rộng">▾</button>
+          <button id="headerToggleBtn" class="text-lg flex-shrink-0 transition-transform duration-200">▾</button>
           <div class="min-w-0 flex-1">
             <div class="text-[10px] opacity-75 leading-none">Nhà phân phối</div>
             <div class="flex items-baseline gap-2 min-w-0">
@@ -1422,16 +1262,17 @@ window.addEventListener('DOMContentLoaded', () => {
         </div>
         <button id="logoutBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1.5 rounded whitespace-nowrap">Đăng xuất</button>
       </div>
-
       <div id="headerExpanded" class="pb-3 border-t border-blue-600/40 overflow-hidden">
         <div class="pt-2 space-y-1">
           <div id="distName" class="font-bold text-sm truncate"></div>
           <div id="distAlias" class="text-xs opacity-75 truncate"></div>
           <div id="userInfo" class="text-xs opacity-90 truncate"></div>
           <div id="sessionInfo" class="text-[10px] opacity-70 font-mono truncate"></div>
+          <div id="sessionStatus" class="text-[11px] mt-1 flex items-center"></div>
           <div class="flex items-center gap-2 mt-1 flex-wrap">
             <button id="reloadBtn" class="text-[10px] bg-blue-800 hover:bg-blue-900 px-2 py-1 rounded">🔄 Tải lại</button>
             <button id="continuousBtn" class="text-[10px] hover:opacity-90 px-2 py-1 rounded font-semibold">🔁 Quét liên tục</button>
+            <button id="restoreDraftBtn" class="text-[10px] bg-amber-600 hover:bg-amber-700 px-2 py-1 rounded">📥 Khôi phục nháp</button>
             <span id="cacheInfo" class="text-[10px] opacity-70"></span>
             <span id="offlineBadge" class="hidden text-[10px] bg-amber-500 text-white px-2 py-1 rounded offline-badge"></span>
           </div>
@@ -1453,14 +1294,11 @@ window.addEventListener('DOMContentLoaded', () => {
       </button>
     </div>
 
-    <!-- ĐỊNH VỊ KHO -->
+    <!-- GPS -->
     <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200">
       <div class="flex items-start justify-between gap-2">
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2">
-            <span class="text-base">📍</span>
-            <div class="font-semibold text-sm text-slate-800">Vị trí kho kiểm kê</div>
-          </div>
+          <div class="flex items-center gap-2"><span class="text-base">📍</span><div class="font-semibold text-sm text-slate-800">Vị trí kho kiểm kê</div></div>
           <div id="locStatus" class="text-xs text-slate-500 mt-1">Chưa lấy vị trí</div>
           <div id="locAddress" class="text-xs text-blue-700 mt-1 hidden font-medium"></div>
           <div id="locCoords" class="text-[10px] text-slate-400 font-mono mt-0.5 hidden"></div>
@@ -1484,10 +1322,25 @@ window.addEventListener('DOMContentLoaded', () => {
   </main>
 
   <div class="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-2xl z-30">
-    <div class="max-w-2xl mx-auto p-3 grid grid-cols-2 gap-3">
-      <button id="exportBtn" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-xl">⬇ Xuất CSV</button>
-      <button id="submitBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">☁ Gửi Sheet</button>
+    <div class="max-w-2xl mx-auto p-3 grid grid-cols-3 gap-2">
+      <button id="exportBtn" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-3 rounded-xl text-sm">⬇ CSV</button>
+      <button id="saveDraftBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 rounded-xl text-sm">💾 Lưu nháp</button>
+      <button id="submitBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">✅ Chính thức</button>
     </div>
+  </div>
+</div>
+
+<!-- DRAFTS MODAL -->
+<div id="draftsModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+  <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl max-h-[85vh] flex flex-col">
+    <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+      <div>
+        <h3 class="font-bold text-slate-800 text-lg">📥 Phiên nháp đã lưu</h3>
+        <p class="text-xs text-slate-500 mt-0.5">Chọn phiên để khôi phục giỏ hàng</p>
+      </div>
+      <button id="closeDraftsBtn" class="text-2xl text-slate-500 px-2">✕</button>
+    </div>
+    <div id="draftsList" class="overflow-y-auto flex-1"></div>
   </div>
 </div>
 
@@ -1513,9 +1366,7 @@ window.addEventListener('DOMContentLoaded', () => {
   <div class="pb-6 px-4">
     <p class="text-center text-white/70 text-sm mb-3">Đưa barcode vào khung</p>
     <div class="flex justify-center">
-      <button id="scanToManualBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-4 rounded-lg text-sm">
-        ⌨️ Không quét được? Nhập mã SP
-      </button>
+      <button id="scanToManualBtn" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-4 rounded-lg text-sm">⌨️ Không quét được? Nhập mã SP</button>
     </div>
   </div>
 </div>
@@ -1542,19 +1393,12 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
       <button id="closeItemCodeBtn" class="text-2xl text-slate-500 px-2">✕</button>
     </div>
-
     <div id="itemCodeWarn" class="hidden"></div>
-
     <label class="text-xs font-semibold text-slate-600">Mã sản phẩm (ItemCode)</label>
     <input id="itemCodeInput" type="text" autocomplete="off" placeholder="VD: 81002529"
       class="w-full border border-slate-300 rounded-lg px-3 py-3 text-lg font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
     <div id="itemCodePreview" class="mt-3 hidden"></div>
-
-    <button id="gotoSearchBtn"
-      class="w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-semibold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2">
-      🔍 Không biết mã? Tìm theo tên sản phẩm
-    </button>
-
+    <button id="gotoSearchBtn" class="w-full mt-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-semibold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2">🔍 Không biết mã? Tìm theo tên SP</button>
     <div class="grid grid-cols-2 gap-3 mt-5">
       <button id="itemCodeCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
       <button id="itemCodeNextBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Tiếp tục</button>
@@ -1565,7 +1409,6 @@ window.addEventListener('DOMContentLoaded', () => {
 <!-- QTY MODAL -->
 <div id="qtyModal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center overflow-y-auto">
   <div class="w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl my-4 overflow-hidden">
-
     <div class="sticky top-0 bg-gradient-to-b from-blue-50 to-white border-b border-blue-100 px-5 pt-4 pb-3 z-20">
       <div class="flex items-start gap-3">
         <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl flex-shrink-0">📦</div>
@@ -1575,25 +1418,17 @@ window.addEventListener('DOMContentLoaded', () => {
           <p id="qtyItemMeta" class="text-xs text-slate-500 mt-1"></p>
         </div>
       </div>
-      <button id="copyPrevBtn" class="hidden w-full mt-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">
-        📋 Dùng lại: ...
-      </button>
+      <button id="copyPrevBtn" class="hidden w-full mt-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold py-2 rounded-lg">📋 Dùng lại: ...</button>
     </div>
-
     <div class="px-5 pb-5">
       <div class="grid grid-cols-2 gap-3 mt-4">
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Số thùng</label>
+        <div><label class="text-xs font-semibold text-slate-600">Số thùng</label>
           <input id="qtyCases" type="number" inputmode="numeric" min="0" placeholder="0"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-        </div>
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
+        <div><label class="text-xs font-semibold text-slate-600">Số gói lẻ</label>
           <input id="qtyPacks" type="number" inputmode="numeric" min="0" placeholder="0"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-        </div>
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
       </div>
-
       <div class="mt-4 pt-4 border-t border-slate-200">
         <div class="flex items-center justify-between mb-2">
           <div class="text-xs font-bold text-slate-700 uppercase tracking-wide">Thông tin sản xuất</div>
@@ -1602,44 +1437,29 @@ window.addEventListener('DOMContentLoaded', () => {
             <span>Bỏ qua Line/Ca/Máy</span>
           </label>
         </div>
-
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
-          <input id="qtyProdDate" type="date"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-        </div>
-
+        <div><label class="text-xs font-semibold text-slate-600">Ngày SX <span class="text-red-500">*</span></label>
+          <input id="qtyProdDate" type="date" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" /></div>
         <div id="prodInfoFields" class="transition-opacity">
-          <div class="mt-3">
-            <label class="text-xs font-semibold text-slate-600">Máy đóng gói số</label>
+          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Máy đóng gói số</label>
             <input id="qtyPackMachine" type="text" list="machineList" placeholder="VD: Máy 3"
               class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
-            <datalist id="machineList"></datalist>
-          </div>
-          <div class="mt-3">
-            <label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
-            <select id="qtyProdLine"
-              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+            <datalist id="machineList"></datalist></div>
+          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Line sản xuất</label>
+            <select id="qtyProdLine" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
             <input id="qtyProdLineOther" type="text" placeholder="Nhập tên Line..."
-              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
-          </div>
-          <div class="mt-3">
-            <label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
-            <select id="qtyProdShift"
-              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" /></div>
+          <div class="mt-3"><label class="text-xs font-semibold text-slate-600">Ca sản xuất</label>
+            <select id="qtyProdShift" class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"></select>
             <input id="qtyProdShiftOther" type="text" placeholder="Nhập tên Ca..."
-              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" />
-          </div>
+              class="hidden-input w-full border border-amber-400 bg-amber-50 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500 mt-2" /></div>
         </div>
       </div>
-
       <div class="mt-4 bg-slate-50 rounded-lg p-3">
         <label class="text-xs font-semibold text-slate-600">Tổng (có thể sửa trực tiếp)</label>
         <input id="qtyTotal" type="text" inputmode="numeric" placeholder="0"
           class="w-full border border-slate-300 rounded-lg px-3 py-2 text-lg font-bold text-blue-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" />
         <p id="qtyBreakdown" class="text-xs text-slate-500 mt-2"></p>
       </div>
-
       <div class="grid grid-cols-2 gap-3 mt-5">
         <button id="qtyCancelBtn" class="bg-slate-200 hover:bg-slate-300 font-semibold py-3 rounded-xl">Huỷ</button>
         <button id="qtyAddBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl">Thêm</button>
